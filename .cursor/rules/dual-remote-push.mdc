@@ -1,0 +1,18 @@
+---
+description: Always commit and push to both GitHub and GitLab remotes
+alwaysApply: true
+---
+
+# Dual remote push
+
+When the user asks to commit and/or push in this workspace:
+
+1. Create the commit as requested (follow conventional commits).
+2. Always push to **both** remotes after a successful commit:
+   - GitHub: `https://github.com/evaaliya/developing_with_qnx`
+   - GitLab: `https://gitlab.com/evaaliya/developing_with_qnx`
+3. Prefer `git push origin <branch>` when `origin` is configured with both push URLs; otherwise push explicitly:
+   - `git push github HEAD`
+   - `git push gitlab HEAD`
+4. Do not stop after pushing to only one host. Report both URLs (or the failure) in the reply.
+5. If a remote or auth is missing, fix or recreate it, then push to both.

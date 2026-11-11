@@ -9,14 +9,14 @@
 		{
 			"type": "shell",
 			"label": "QNX: build debug",
-			"command": "make BUILD_PROFILE=debug PLATFORM=${config:qnx.arch} all",
+			"command": "make",
 			"options": {
 				"cwd": "${workspaceFolder}",
 				"env": {
 					"QNX_HOST": "${env:QNX_HOST}",
 					"QNX_TARGET": "${env:QNX_TARGET}",
 					"MAKEFLAGS": "${env:MAKEFLAGS}",
-					"Path": "${env:Path}"
+					"PATH": "${env:PATH}"
 				}
 			},
 			"problemMatcher": [

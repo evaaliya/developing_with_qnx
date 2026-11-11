@@ -17,7 +17,7 @@ int main(int argc, char* argv[])
 
 	while (1)
 	{
-		printf("#%d: ", i++)
+		printf("#%d: ", i++);
 		for (j = 1; j < argc; j++)
 		{
 			printf("%s ", argv[j]);

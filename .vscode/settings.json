@@ -1,3 +1,5 @@
 {
-    "qnx.projects.autoConfigure": "no"
+    "qnx.projects.autoConfigure": "no",
+    "qnx.sdpPath": "/Users/diana/qnx800",
+    "qnx.config.defaultProjectsRoot": "/Users/diana/qnxprojects"
 }
