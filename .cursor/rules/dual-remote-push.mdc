@@ -1,18 +1,18 @@
 ---
-description: Always commit and push to both GitHub and GitLab remotes
+description: Do not push until Eva says so; when she does, push to both GitHub and GitLab
 alwaysApply: true
 ---
 
 # Dual remote push
 
-When the user asks to commit and/or push in this workspace:
+**Do not push until Eva says so.** A push is allowed only when Eva's current message contains the word «push» or «запушь». A request to commit is not a request to push.
 
-1. Create the commit as requested (follow conventional commits).
-2. Always push to **both** remotes after a successful commit:
+1. When Eva asks for a commit, create the commit locally (follow conventional commits) and stop there.
+2. When Eva has said to push, follow the push steps in `10-git-discipline.mdc` and push to **both** remotes:
    - GitHub: `https://github.com/evaaliya/developing_with_qnx`
    - GitLab: `https://gitlab.com/evaaliya/developing_with_qnx`
-3. Prefer `git push origin <branch>` when `origin` is configured with both push URLs; otherwise push explicitly:
-   - `git push github HEAD`
-   - `git push gitlab HEAD`
-4. Do not stop after pushing to only one host. Report both URLs (or the failure) in the reply.
-5. If a remote or auth is missing, fix or recreate it, then push to both.
+3. Push with **one command**. The remote `origin` has two push URLs, GitHub and GitLab, so a single push reaches both hosts:
+   - `PUSH_OK=1 git push origin <branch>`
+   Do not push to the two hosts as two separate steps. Without `PUSH_OK=1` the `pre-push` hook blocks the push.
+4. After the push, read back both hosts (`git ls-remote github` and `git ls-remote gitlab`) and report both URLs, or the failure, in the reply. If one host accepted the push and the other did not, say so.
+5. If a remote or auth is missing, tell Eva and wait for «ок». Do not add or change a remote on your own.
