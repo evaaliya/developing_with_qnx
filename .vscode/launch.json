@@ -4,10 +4,10 @@
     {
       "type": "qnx-gdb",
       "request": "launch",
-      "name": "QNX: hello",
+      "name": "QNX: .vscode",
       "gdb": "gdb",
       "program": "${command:qnx.autodetectBinary}",
-      "remotePath": "hello",
+      "remotePath": ".vscode",
       "qnxtarget": "default",
       "upload": true,
       "stopAtEntry": true,

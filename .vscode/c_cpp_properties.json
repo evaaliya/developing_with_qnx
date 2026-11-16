@@ -6,7 +6,7 @@
       "includePath": [
         "${workspaceFolder}/**"
       ],
-      "compilerPath": "/usr/bin/clang",
+      "compilerPath": "${env:QNX_HOST}/usr/bin/ntox86_64-gcc",
       "defines": [
         "${default}"
       ],
