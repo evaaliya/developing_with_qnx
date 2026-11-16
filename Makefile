@@ -1,21 +1,22 @@
 #
-# Makefile for hello project (macOS + Docker QNX build)
+# Makefile for my-project (macOS + Docker QNX build)
 # Host make only orchestrates the Linux QNX tools inside the qnx-build container.
 #
 
-PROJECT_DIR = /home/$(USER)/Documents/GitHub/vsc-developing-r01-exercises-1767971935/hello
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+# The container mounts the Mac home directory at /home/$(USER).
+PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 
 default:
-	docker exec -it qnx-build $(PROJECT_DIR)/build.sh
+	docker exec -it qnx-build "$(PROJECT_DIR)/build.sh"
 
 all: default
 
 clean:
-	rm -f *.o hello
-	cd solutions; $(MAKE) clean_soln
+	rm -f my-project
 
 upload:
-	sshpass -p "qnxuser" scp ./hello qnxuser@192.168.1.100:~
+	scp -P 2222 -i $(HOME)/.ssh/id_ed25519 ./my-project root@localhost:/tmp/my-project
 
 run:
-	sshpass -p "qnxuser" ssh qnxuser@192.168.1.100 "/data/home/qnxuser/hello"
+	ssh -p 2222 -i $(HOME)/.ssh/id_ed25519 root@localhost "chmod +x /tmp/my-project && /tmp/my-project"
