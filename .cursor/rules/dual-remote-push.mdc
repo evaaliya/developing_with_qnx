@@ -1,18 +1,22 @@
 ---
-description: Do not push until Eva says so; when she does, push to both GitHub and GitLab
+description: Commit every project decision locally in English; never push — print the push command for the person to run
 alwaysApply: true
 ---
 
-# Dual remote push
+# Commits and push
 
-**Do not push until Eva says so.** A push is allowed only when Eva's current message contains the word «push» or «запушь». A request to commit is not a request to push.
+## Commits
+1. Commit every decision you make about the project, locally, as soon as the step is done. Never skip or postpone a commit, and do not ask for permission to commit.
+2. Commit messages are in English only and follow Conventional Commits. The detailed steps are in `10-git-discipline.mdc`.
 
-1. When Eva asks for a commit, create the commit locally (follow conventional commits) and stop there.
-2. When Eva has said to push, follow the push steps in `10-git-discipline.mdc` and push to **both** remotes:
+## Push — the agent never pushes
+3. The person always pushes from their own terminal.
+4. When something should go online, print this command for the person to run:
+   ```
+   PUSH_OK=1 git push origin <branch>
+   ```
+   The remote `origin` has two push URLs, so this one command reaches both hosts:
    - GitHub: `https://github.com/evaaliya/developing_with_qnx`
    - GitLab: `https://gitlab.com/evaaliya/developing_with_qnx`
-3. Push with **one command**. The remote `origin` has two push URLs, GitHub and GitLab, so a single push reaches both hosts:
-   - `PUSH_OK=1 git push origin <branch>`
-   Do not push to the two hosts as two separate steps. Without `PUSH_OK=1` the `pre-push` hook blocks the push.
-4. After the push, read back both hosts (`git ls-remote github` and `git ls-remote gitlab`) and report both URLs, or the failure, in the reply. If one host accepted the push and the other did not, say so.
-5. If a remote or auth is missing, tell Eva and wait for «ок». Do not add or change a remote on your own.
+5. After the person has pushed, and if they ask, read back both hosts (`git ls-remote github` and `git ls-remote gitlab`) and report what each one holds.
+6. Never add or change a remote on your own.
