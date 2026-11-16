@@ -1,7 +1,11 @@
 #!/bin/bash
 source /usr/local/qnx/env/bin/activate
 source "$HOME/qnx800/qnxsdp-env.sh"
+set -eu
 
 cd "$(dirname "$0")"
+mkdir -p build
 
-ntoaarch64-gcc -o my-project my-project.c
+CFLAGS=(-std=c11 -Wall -Wextra -Werror -I src/common)
+ntoaarch64-gcc "${CFLAGS[@]}" -o build/sink src/sink/sink.c src/common/signal_msg.c
+ntoaarch64-gcc "${CFLAGS[@]}" -o build/source src/source/source.c src/common/signal_msg.c
