@@ -30,9 +30,12 @@ test:
 		tests/test_queue.c src/common/signal_queue.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-net-state \
 		tests/test_net_state.c src/common/net_state.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-restart \
+		tests/test_restart.c src/common/restart_limit.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
+	./build/test-restart
 
 clean:
 	rm -rf build
