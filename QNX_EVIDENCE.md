@@ -79,9 +79,9 @@ docker exec qnx-build "/home/diana/Downloads/sample 4 projects/project-kit/build
 QNX_HOST=/home/diana/qnx800/host/linux/x86_64
 QNX_TARGET=/home/diana/qnx800/target/qnx
 MAKEFLAGS=-I/home/diana/qnx800/target/qnx/usr/include
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay root@localhost:/tmp/
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay root@localhost:/tmp/
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
 	  total=$((3 + 3 + 3)); \
 	  /tmp/sink $total > /tmp/sink.out 2>&1 & \
 	  sink_pid=$!; \
@@ -169,10 +169,10 @@ docker exec qnx-build "/home/diana/Downloads/sample 4 projects/project-kit/build
 QNX_HOST=/home/diana/qnx800/host/linux/x86_64
 QNX_TARGET=/home/diana/qnx800/target/qnx
 MAKEFLAGS=-I/home/diana/qnx800/target/qnx/usr/include
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
-scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh kill'
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh kill'
 guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 scenario: killing relay-b pid 31490072
 --- supervisor (exit 0) ---
@@ -312,10 +312,10 @@ docker exec qnx-build "/home/diana/Downloads/sample 4 projects/project-kit/build
 QNX_HOST=/home/diana/qnx800/host/linux/x86_64
 QNX_TARGET=/home/diana/qnx800/target/qnx
 MAKEFLAGS=-I/home/diana/qnx800/target/qnx/usr/include
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
-scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
-ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh lock'
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh lock'
 guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 scenario: killing relay-b pid 31051800
 scenario: killing restarted relay-b pid 31137816
