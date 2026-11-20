@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test
+.PHONY: default all clean upload run test run-kill run-lock
 
 CHAIN_URGENT := 3
 CHAIN_COMMAND := 3
@@ -45,8 +45,9 @@ clean:
 	rm -f my-project
 
 upload: default
-	$(SSH) root@localhost "slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-	$(SCP) ./build/source ./build/sink ./build/relay root@localhost:/tmp/
+	$(SSH) root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+	$(SCP) ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+	$(SCP) ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
 
 run: upload
 	$(SSH) root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
@@ -76,3 +77,9 @@ run: upload
 	  cat /tmp/sink.out; \
 	  if [ "$$source_status" -ne 0 ]; then exit "$$source_status"; fi; \
 	  exit "$$sink_status"'
+
+run-kill: upload
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh kill'
+
+run-lock: upload
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh lock'
