@@ -419,3 +419,178 @@ sink: summary COMMAND received 2, on time 2, late 0, lost 0
 sink: summary BACKGROUND received 2, on time 2, late 0, lost 0
 sink: unaccounted 0
 ```
+
+## 2026-11-21 00:42:18 +06 · flood, one run, not a measurement
+
+`make run-flood` from `<project-dir>`. The log file was written at this time. Exit code 0. Guest line from the same session, before this run: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`. QEMU `-accel tcg`, CPU 0 pin unchanged. Relay A was started with `-q 8`. Relay B kept the default queue of 64. Source sent 3 URGENT, 3 COMMAND, and 40 BACKGROUND. The signal deadline is still the 1 second placeholder. Printed hop times are this run only.
+
+Relay A printed `dropped signal` for signals 10 through 46, each `class BACKGROUND` (37 lines). It did not print a dropped URGENT or COMMAND. It forwarded 1, then 3, 6, 9, 2, 5, 8, 4, and 7. Signal 1 left while nothing else was waiting. The other eight filled the queue of 8, so later BACKGROUND signals were discarded on arrival. This run did not have to evict a BACKGROUND already in the queue: every URGENT and COMMAND was already accepted before the queue stayed full. Sink printed `state DEGRADED` and `unaccounted 0`. BACKGROUND received 3, dropped 37, lost 0.
+
+An earlier `make run-flood` in this session, before the startup fix, had recorded all 46 signals as `lost signal` and had not printed `dropped`. That log is not this one.
+
+```text
+mkdir -p build
+docker exec qnx-build "<project-dir>/build.sh"
+QNX_HOST=$HOME/qnx800/host/linux/x86_64
+QNX_TARGET=$HOME/qnx800/target/qnx
+MAKEFLAGS=-I$HOME/qnx800/target/qnx/usr/include
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
+	  total=$((3 + 3 + 40)); \
+	  /tmp/sink $total > /tmp/sink.out 2>&1 & \
+	  sink_pid=$!; \
+	  /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 & \
+	  relay_b=$!; \
+	  /tmp/relay signal-relay-a signal-relay-b -q 8 > /tmp/relay-a.out 2>&1 & \
+	  relay_a=$!; \
+	  /tmp/source 3 3 40 signal-relay-a > /tmp/source.out 2>&1; \
+	  source_status=$?; \
+	  sink_status=0; \
+	  wait $sink_pid || sink_status=$?; \
+	  slay -Q -f relay >/dev/null 2>&1 || true; \
+	  slay -Q -f source >/dev/null 2>&1 || true; \
+	  slay -Q -f sink >/dev/null 2>&1 || true; \
+	  wait $relay_a >/dev/null 2>&1 || true; \
+	  wait $relay_b >/dev/null 2>&1 || true; \
+	  echo "--- source (exit $source_status) ---"; \
+	  cat /tmp/source.out; \
+	  echo "--- relay A ---"; \
+	  cat /tmp/relay-a.out; \
+	  echo "--- relay B ---"; \
+	  cat /tmp/relay-b.out; \
+	  echo "--- sink (exit $sink_status) ---"; \
+	  cat /tmp/sink.out; \
+	  if [ "$source_status" -ne 0 ]; then exit "$source_status"; fi; \
+	  exit "$sink_status"'
+--- source (exit 0) ---
+source: SCHED_FIFO ceiling 253, sending 3 URGENT, 3 COMMAND, 40 BACKGROUND to signal-relay-a
+source: sent signal 1 class BACKGROUND
+source: sent signal 2 class COMMAND
+source: sent signal 3 class URGENT
+source: sent signal 4 class BACKGROUND
+source: sent signal 5 class COMMAND
+source: sent signal 6 class URGENT
+source: sent signal 7 class BACKGROUND
+source: sent signal 8 class COMMAND
+source: sent signal 9 class URGENT
+source: sent signal 10 class BACKGROUND
+source: sent signal 11 class BACKGROUND
+source: sent signal 12 class BACKGROUND
+source: sent signal 13 class BACKGROUND
+source: sent signal 14 class BACKGROUND
+source: sent signal 15 class BACKGROUND
+source: sent signal 16 class BACKGROUND
+source: sent signal 17 class BACKGROUND
+source: sent signal 18 class BACKGROUND
+source: sent signal 19 class BACKGROUND
+source: sent signal 20 class BACKGROUND
+source: sent signal 21 class BACKGROUND
+source: sent signal 22 class BACKGROUND
+source: sent signal 23 class BACKGROUND
+source: sent signal 24 class BACKGROUND
+source: sent signal 25 class BACKGROUND
+source: sent signal 26 class BACKGROUND
+source: sent signal 27 class BACKGROUND
+source: sent signal 28 class BACKGROUND
+source: sent signal 29 class BACKGROUND
+source: sent signal 30 class BACKGROUND
+source: sent signal 31 class BACKGROUND
+source: sent signal 32 class BACKGROUND
+source: sent signal 33 class BACKGROUND
+source: sent signal 34 class BACKGROUND
+source: sent signal 35 class BACKGROUND
+source: sent signal 36 class BACKGROUND
+source: sent signal 37 class BACKGROUND
+source: sent signal 38 class BACKGROUND
+source: sent signal 39 class BACKGROUND
+source: sent signal 40 class BACKGROUND
+source: sent signal 41 class BACKGROUND
+source: sent signal 42 class BACKGROUND
+source: sent signal 43 class BACKGROUND
+source: sent signal 44 class BACKGROUND
+source: sent signal 45 class BACKGROUND
+source: sent signal 46 class BACKGROUND
+source: sent manifest of 46 signals
+source: sent 46 signals
+--- relay A ---
+relay signal-relay-a: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-a: dropped signal 10 class BACKGROUND
+relay signal-relay-a: dropped signal 11 class BACKGROUND
+relay signal-relay-a: dropped signal 12 class BACKGROUND
+relay signal-relay-a: dropped signal 13 class BACKGROUND
+relay signal-relay-a: dropped signal 14 class BACKGROUND
+relay signal-relay-a: dropped signal 15 class BACKGROUND
+relay signal-relay-a: dropped signal 16 class BACKGROUND
+relay signal-relay-a: dropped signal 17 class BACKGROUND
+relay signal-relay-a: dropped signal 18 class BACKGROUND
+relay signal-relay-a: dropped signal 19 class BACKGROUND
+relay signal-relay-a: dropped signal 20 class BACKGROUND
+relay signal-relay-a: dropped signal 21 class BACKGROUND
+relay signal-relay-a: dropped signal 22 class BACKGROUND
+relay signal-relay-a: dropped signal 23 class BACKGROUND
+relay signal-relay-a: dropped signal 24 class BACKGROUND
+relay signal-relay-a: dropped signal 25 class BACKGROUND
+relay signal-relay-a: dropped signal 26 class BACKGROUND
+relay signal-relay-a: dropped signal 27 class BACKGROUND
+relay signal-relay-a: dropped signal 28 class BACKGROUND
+relay signal-relay-a: dropped signal 29 class BACKGROUND
+relay signal-relay-a: dropped signal 30 class BACKGROUND
+relay signal-relay-a: dropped signal 31 class BACKGROUND
+relay signal-relay-a: dropped signal 32 class BACKGROUND
+relay signal-relay-a: dropped signal 33 class BACKGROUND
+relay signal-relay-a: dropped signal 34 class BACKGROUND
+relay signal-relay-a: dropped signal 35 class BACKGROUND
+relay signal-relay-a: dropped signal 36 class BACKGROUND
+relay signal-relay-a: dropped signal 37 class BACKGROUND
+relay signal-relay-a: dropped signal 38 class BACKGROUND
+relay signal-relay-a: dropped signal 39 class BACKGROUND
+relay signal-relay-a: dropped signal 40 class BACKGROUND
+relay signal-relay-a: dropped signal 41 class BACKGROUND
+relay signal-relay-a: dropped signal 42 class BACKGROUND
+relay signal-relay-a: dropped signal 43 class BACKGROUND
+relay signal-relay-a: dropped signal 44 class BACKGROUND
+relay signal-relay-a: dropped signal 45 class BACKGROUND
+relay signal-relay-a: dropped signal 46 class BACKGROUND
+relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none
+relay signal-relay-a: sent signal 3 class URGENT; still waiting: signal 2 COMMAND, signal 4 BACKGROUND, signal 5 COMMAND, signal 6 URGENT, signal 7 BACKGROUND, signal 8 COMMAND, signal 9 URGENT
+relay signal-relay-a: sent signal 6 class URGENT; still waiting: signal 2 COMMAND, signal 4 BACKGROUND, signal 5 COMMAND, signal 7 BACKGROUND, signal 8 COMMAND, signal 9 URGENT
+relay signal-relay-a: sent signal 9 class URGENT; still waiting: signal 2 COMMAND, signal 4 BACKGROUND, signal 5 COMMAND, signal 7 BACKGROUND, signal 8 COMMAND
+relay signal-relay-a: sent signal 2 class COMMAND; still waiting: signal 4 BACKGROUND, signal 5 COMMAND, signal 7 BACKGROUND, signal 8 COMMAND
+relay signal-relay-a: sent signal 5 class COMMAND; still waiting: signal 4 BACKGROUND, signal 7 BACKGROUND, signal 8 COMMAND
+relay signal-relay-a: sent signal 8 class COMMAND; still waiting: signal 4 BACKGROUND, signal 7 BACKGROUND
+relay signal-relay-a: sent signal 4 class BACKGROUND; still waiting: signal 7 BACKGROUND
+relay signal-relay-a: sent signal 7 class BACKGROUND; still waiting: none
+relay signal-relay-a: forwarded manifest of 46 signals
+--- relay B ---
+relay signal-relay-b: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-b: sent signal 1 class BACKGROUND; still waiting: none
+relay signal-relay-b: sent signal 3 class URGENT; still waiting: none
+relay signal-relay-b: sent signal 6 class URGENT; still waiting: signal 9 URGENT, signal 2 COMMAND
+relay signal-relay-b: sent signal 9 class URGENT; still waiting: signal 2 COMMAND, signal 5 COMMAND
+relay signal-relay-b: sent signal 2 class COMMAND; still waiting: signal 5 COMMAND, signal 8 COMMAND
+relay signal-relay-b: sent signal 5 class COMMAND; still waiting: signal 8 COMMAND, signal 4 BACKGROUND
+relay signal-relay-b: sent signal 8 class COMMAND; still waiting: signal 4 BACKGROUND, signal 7 BACKGROUND
+relay signal-relay-b: sent signal 4 class BACKGROUND; still waiting: signal 7 BACKGROUND
+relay signal-relay-b: sent signal 7 class BACKGROUND; still waiting: none
+relay signal-relay-b: forwarded manifest of 46 signals
+relay signal-relay-b: link down signal-sink coid 1073741826
+--- sink (exit 0) ---
+sink: state INIT
+sink: signal 1 class BACKGROUND on time, held, hops 274000 ns, 26262992 ns, 526000 ns, total 27062992 ns
+sink: signal 3 class URGENT on time, fresh, hops 71008 ns, 26398992 ns, 531008 ns, total 27001008 ns
+sink: state NORMAL
+sink: signal 6 class URGENT on time, fresh, hops 61008 ns, 25760000 ns, 1076992 ns, total 26898000 ns
+sink: signal 9 class URGENT on time, fresh, hops 54000 ns, 25514992 ns, 1129008 ns, total 26698000 ns
+sink: signal 2 class COMMAND on time, fresh, hops 514000 ns, 27922992 ns, 1429008 ns, total 29866000 ns
+sink: signal 5 class COMMAND on time, fresh, hops 60992 ns, 27525008 ns, 1350000 ns, total 28936000 ns
+sink: signal 8 class COMMAND on time, fresh, hops 56000 ns, 27244000 ns, 1340000 ns, total 28640000 ns
+sink: signal 4 class BACKGROUND on time, fresh, hops 62992 ns, 28955008 ns, 1270992 ns, total 30288992 ns
+sink: signal 7 class BACKGROUND on time, fresh, hops 58992 ns, 28630000 ns, 1069008 ns, total 29758000 ns
+sink: state DEGRADED
+sink: summary URGENT received 3, on time 3, late 0, lost 0, dropped 0
+sink: summary COMMAND received 3, on time 3, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 3, on time 3, late 0, lost 0, dropped 37
+sink: unaccounted 0
+```
