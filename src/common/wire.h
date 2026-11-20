@@ -15,6 +15,29 @@
 
 #define SIGNAL_ATTACH_NAME "signal-sink"
 #define SIGNAL_MSG_TYPE ((uint16_t)512)
+#define SIGNAL_MSG_MANIFEST ((uint16_t)513)
+#define SIGNAL_MSG_LOCK ((uint16_t)514)
+
+#define SIGNAL_MANIFEST_CAP 64
+
+struct signal_manifest_item {
+    uint64_t number;
+    uint32_t class_id;
+    uint32_t reserved;
+};
+
+struct signal_manifest {
+    uint16_t type;
+    uint16_t count;
+    uint32_t reserved;
+    struct signal_manifest_item item[SIGNAL_MANIFEST_CAP];
+};
+
+struct signal_lock {
+    uint16_t type;
+    uint16_t reserved0;
+    uint32_t reserved1;
+};
 
 struct signal_message {
     uint16_t type;

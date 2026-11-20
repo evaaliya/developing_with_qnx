@@ -33,6 +33,10 @@ struct relay {
     pthread_cond_t ready;
     uint64_t next_order;
     int own_priority;
+    int next_coid;
+    int manifest_waiting;
+    rcvid_t manifest_rcvid;
+    struct signal_manifest manifest;
 };
 
 static int set_fifo(const char *who, int priority)
@@ -93,7 +97,7 @@ static int open_next(const char *name)
         if (coid != -1) {
             return coid;
         }
-        if (errno != ENOENT) {
+        if (errno != ENOENT && errno != ESRCH) {
             fprintf(stderr, "relay: opening the next name %s failed: %s\n",
                     name, strerror(errno));
             return -1;
@@ -106,6 +110,73 @@ static int open_next(const char *name)
     fprintf(stderr, "relay: could not find a node registered as %s after 2 seconds\n",
             name);
     return -1;
+}
+
+static void write_lost(const struct relay *node, const struct signal *sig)
+{
+    printf("relay %s: lost signal %" PRIu64 " class %s\n",
+           node->own_name, sig->number, signal_class_name(sig->class_id));
+    fflush(stdout);
+}
+
+/* The caller holds node->lock. */
+static void drain_lost_locked(struct relay *node)
+{
+    struct signal_queue_item item;
+
+    while (signal_queue_pop(&node->queue, &item) == 0) {
+        write_lost(node, &item.body);
+    }
+}
+
+static int reopen_next(struct relay *node)
+{
+    for (;;) {
+        int coid = open_next(node->next_name);
+
+        if (coid != -1) {
+            printf("relay %s: reopened %s coid %d\n",
+                   node->own_name, node->next_name, coid);
+            fflush(stdout);
+            return coid;
+        }
+        pthread_mutex_lock(&node->lock);
+        drain_lost_locked(node);
+        pthread_mutex_unlock(&node->lock);
+        fprintf(stderr, "relay %s: %s is not back yet\n",
+                node->own_name, node->next_name);
+    }
+}
+
+static void close_quietly(const struct relay *node, int coid)
+{
+    if (name_close(coid) == -1 && errno != EBADF) {
+        fprintf(stderr, "relay %s: closing the dead connection failed: %s\n",
+                node->own_name, strerror(errno));
+    }
+}
+
+/* current is the signal whose send failed. NULL when nothing was in flight. */
+static void send_failed(struct relay *node, int coid, const struct signal *current)
+{
+    int fresh;
+
+    printf("relay %s: link down %s coid %d\n",
+           node->own_name, node->next_name, coid);
+    fflush(stdout);
+    if (current != NULL) {
+        write_lost(node, current);
+    }
+    pthread_mutex_lock(&node->lock);
+    drain_lost_locked(node);
+    node->next_coid = -1;
+    pthread_mutex_unlock(&node->lock);
+    close_quietly(node, coid);
+    fresh = reopen_next(node);
+    pthread_mutex_lock(&node->lock);
+    node->next_coid = fresh;
+    pthread_cond_signal(&node->ready);
+    pthread_mutex_unlock(&node->lock);
 }
 
 static void format_waiting(const struct signal_queue *q, char *buf, size_t buf_len)
@@ -146,25 +217,89 @@ static void *forward_main(void *arg)
     if (coid == -1) {
         exit(EXIT_FAILURE);
     }
+    pthread_mutex_lock(&node->lock);
+    node->next_coid = coid;
+    pthread_mutex_unlock(&node->lock);
 
     for (;;) {
         struct signal_queue_item item;
+        struct signal_manifest manifest;
         char waiting[4096];
         struct signal_message message;
         struct signal_reply reply;
+        int have_item = 0;
+        int have_manifest = 0;
+        rcvid_t manifest_rcvid = 0;
         int priority;
         long sent;
 
         pthread_mutex_lock(&node->lock);
-        while (signal_queue_count(&node->queue) == 0) {
+        while (signal_queue_count(&node->queue) == 0 && !node->manifest_waiting &&
+               node->next_coid >= 0) {
             pthread_cond_wait(&node->ready, &node->lock);
         }
-        if (signal_queue_pop(&node->queue, &item) != 0) {
+        coid = node->next_coid;
+        if (coid < 0) {
+            drain_lost_locked(node);
+            pthread_mutex_unlock(&node->lock);
+            coid = reopen_next(node);
+            pthread_mutex_lock(&node->lock);
+            node->next_coid = coid;
             pthread_mutex_unlock(&node->lock);
             continue;
         }
-        format_waiting(&node->queue, waiting, sizeof waiting);
+        if (signal_queue_count(&node->queue) > 0) {
+            if (signal_queue_pop(&node->queue, &item) == 0) {
+                have_item = 1;
+                format_waiting(&node->queue, waiting, sizeof waiting);
+            }
+        } else if (node->manifest_waiting) {
+            manifest = node->manifest;
+            manifest_rcvid = node->manifest_rcvid;
+            node->manifest_waiting = 0;
+            have_manifest = 1;
+        }
         pthread_mutex_unlock(&node->lock);
+
+        if (have_manifest) {
+            sent = MsgSend(coid, &manifest, sizeof manifest, NULL, 0);
+            if (sent == -1) {
+                pthread_mutex_lock(&node->lock);
+                node->manifest = manifest;
+                node->manifest_rcvid = manifest_rcvid;
+                node->manifest_waiting = 1;
+                pthread_mutex_unlock(&node->lock);
+                fprintf(stderr,
+                        "relay %s: sending the manifest to %s failed: %s\n",
+                        node->own_name, node->next_name, strerror(errno));
+                send_failed(node, coid, NULL);
+                continue;
+            }
+            if (sent != EOK) {
+                fprintf(stderr,
+                        "relay %s: %s rejected the manifest with status %ld\n",
+                        node->own_name, node->next_name, sent);
+                if (MsgError(manifest_rcvid, (int)sent) == -1) {
+                    fprintf(stderr,
+                            "relay %s: rejecting the manifest failed: %s\n",
+                            node->own_name, strerror(errno));
+                }
+                continue;
+            }
+            if (MsgReply(manifest_rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "relay %s: replying to the manifest failed: %s\n",
+                        node->own_name, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+            printf("relay %s: forwarded manifest of %u signals\n",
+                   node->own_name, manifest.count);
+            fflush(stdout);
+            continue;
+        }
+
+        if (!have_item) {
+            continue;
+        }
 
         priority = signal_class_priority(item.body.class_id);
         if (priority < 0 || set_fifo(node->own_name, priority) != 0) {
@@ -185,7 +320,8 @@ static void *forward_main(void *arg)
             fprintf(stderr, "relay %s: sending signal %" PRIu64 " to %s failed: %s\n",
                     node->own_name, item.body.number, node->next_name,
                     strerror(errno));
-            exit(EXIT_FAILURE);
+            send_failed(node, coid, &item.body);
+            continue;
         }
         if (sent != EOK) {
             fprintf(stderr,
@@ -250,6 +386,7 @@ int main(int argc, char **argv)
     union {
         struct _pulse pulse;
         struct signal_message message;
+        struct signal_manifest manifest;
     } buffer;
 
     if (argc != 3 || !name_ok(argv[1]) || !name_ok(argv[2])) {
@@ -260,6 +397,7 @@ int main(int argc, char **argv)
     memset(&node, 0, sizeof node);
     node.own_name = argv[1];
     node.next_name = argv[2];
+    node.next_coid = -1;
     signal_queue_init(&node.queue);
     pthread_mutex_init(&node.lock, NULL);
     pthread_cond_init(&node.ready, NULL);
@@ -341,6 +479,34 @@ int main(int argc, char **argv)
                             "failed: %s\n",
                             node.own_name, strerror(errno));
                 }
+            } else if (buffer.pulse.code == _PULSE_CODE_COIDDEATH) {
+                int coid = buffer.pulse.value.sival_int;
+                int closed = -1;
+
+                /*
+                 * ChannelCreate's example compares pulse->type. That field
+                 * is _PULSE_TYPE (0). The death code lives in pulse.code.
+                 * A stale pulse still names a live connection.
+                 */
+                if (ConnectServerInfo(0, coid, NULL) == coid) {
+                    printf("relay %s: stale death pulse coid %d\n",
+                           node.own_name, coid);
+                    fflush(stdout);
+                } else {
+                    pthread_mutex_lock(&node.lock);
+                    if (coid == node.next_coid) {
+                        closed = node.next_coid;
+                        node.next_coid = -1;
+                        pthread_cond_signal(&node.ready);
+                    }
+                    pthread_mutex_unlock(&node.lock);
+                    if (closed != -1) {
+                        printf("relay %s: link down %s coid %d\n",
+                               node.own_name, node.next_name, closed);
+                        fflush(stdout);
+                        close_quietly(&node, closed);
+                    }
+                }
             }
             continue;
         }
@@ -351,6 +517,43 @@ int main(int argc, char **argv)
                        "rejecting a system message failed") != 0) {
                 return EXIT_FAILURE;
             }
+            if (set_fifo(node.own_name, node.own_priority) != 0) {
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+
+        if (buffer.message.type == SIGNAL_MSG_MANIFEST) {
+            if (info.msglen < (ssize_t)sizeof(struct signal_manifest) ||
+                buffer.manifest.count > SIGNAL_MANIFEST_CAP) {
+                fprintf(stderr, "relay %s: the manifest is the wrong size\n",
+                        node.own_name);
+                if (reject(node.own_name, rcvid, EINVAL,
+                           "rejecting the manifest failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            pthread_mutex_lock(&node.lock);
+            if (node.manifest_waiting) {
+                pthread_mutex_unlock(&node.lock);
+                if (reject(node.own_name, rcvid, EBUSY,
+                           "rejecting a second manifest failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            node.manifest = buffer.manifest;
+            node.manifest_rcvid = rcvid;
+            node.manifest_waiting = 1;
+            pthread_cond_signal(&node.ready);
+            pthread_mutex_unlock(&node.lock);
             if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }
@@ -434,6 +637,13 @@ int main(int argc, char **argv)
         if (set_fifo(node.own_name, node.own_priority) != 0) {
             return EXIT_FAILURE;
         }
+        pthread_mutex_lock(&node.lock);
+        if (node.next_coid < 0) {
+            pthread_mutex_unlock(&node.lock);
+            write_lost(&node, &stamped);
+            continue;
+        }
+        pthread_mutex_unlock(&node.lock);
         if (enqueue(&node, &stamped, now_ns) != 0) {
             fprintf(stderr,
                     "relay %s: signal %" PRIu64 " was accepted but did not fit "

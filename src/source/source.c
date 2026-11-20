@@ -28,6 +28,7 @@ _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
 #define FIND_ATTEMPTS 40
 #define FIND_PAUSE_NS 50000000L
 #define SEND_TIMEOUT_SECONDS 5u
+#define MANIFEST_TIMEOUT_SECONDS 20u
 
 static void on_alarm(int signo)
 {
@@ -138,6 +139,38 @@ static int parse_count(const char *text, unsigned long *out)
     return 0;
 }
 
+static void pause_gap(unsigned long gap_ms)
+{
+    struct timespec pause;
+
+    if (gap_ms == 0) {
+        return;
+    }
+    pause.tv_sec = (time_t)(gap_ms / 1000UL);
+    pause.tv_nsec = (long)(gap_ms % 1000UL) * 1000000L;
+    nanosleep(&pause, NULL);
+}
+
+static int send_one(int coid, uint64_t number, uint32_t class_id);
+
+static int send_recorded(int coid, struct signal_manifest *manifest,
+                         unsigned long *recorded, uint64_t *number,
+                         uint32_t class_id, unsigned long gap_ms)
+{
+    if (*number > 1) {
+        pause_gap(gap_ms);
+    }
+    if (*recorded >= SIGNAL_MANIFEST_CAP ||
+        send_one(coid, *number, class_id) != 0) {
+        return -1;
+    }
+    manifest->item[*recorded].number = *number;
+    manifest->item[*recorded].class_id = class_id;
+    (*recorded)++;
+    (*number)++;
+    return 0;
+}
+
 static int send_one(int coid, uint64_t number, uint32_t class_id)
 {
     struct signal_message message;
@@ -188,22 +221,27 @@ int main(int argc, char **argv)
     unsigned long urgent;
     unsigned long command;
     unsigned long background;
+    unsigned long gap_ms = 0;
     unsigned long left_u;
     unsigned long left_c;
     unsigned long left_b;
     unsigned long total;
+    unsigned long recorded = 0;
     uint64_t number;
     int coid;
     int ceiling;
+    struct signal_manifest manifest;
+    long sent;
 
-    if (argc != 5 ||
+    if ((argc != 5 && argc != 6) ||
         parse_count(argv[1], &urgent) != 0 ||
         parse_count(argv[2], &command) != 0 ||
         parse_count(argv[3], &background) != 0 ||
-        argv[4][0] == '\0') {
+        argv[4][0] == '\0' ||
+        (argc == 6 && parse_count(argv[5], &gap_ms) != 0)) {
         fprintf(stderr,
                 "usage: source <urgent-count> <command-count> "
-                "<background-count> <next-name>\n");
+                "<background-count> <next-name> [gap-ms]\n");
         return EXIT_FAILURE;
     }
 
@@ -244,45 +282,68 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    memset(&manifest, 0, sizeof manifest);
+    manifest.type = SIGNAL_MSG_MANIFEST;
     left_u = urgent;
     left_c = command;
     left_b = background;
     number = 1;
     while (left_b > 0 || left_c > 0 || left_u > 0) {
         if (left_b > 0) {
-            if (send_one(coid, number, SIGNAL_CLASS_BACKGROUND) != 0) {
+            if (send_recorded(coid, &manifest, &recorded, &number,
+                              SIGNAL_CLASS_BACKGROUND, gap_ms) != 0) {
                 name_close(coid);
                 return EXIT_FAILURE;
             }
             left_b--;
-            number++;
         }
         if (left_c > 0) {
-            if (send_one(coid, number, SIGNAL_CLASS_COMMAND) != 0) {
+            if (send_recorded(coid, &manifest, &recorded, &number,
+                              SIGNAL_CLASS_COMMAND, gap_ms) != 0) {
                 name_close(coid);
                 return EXIT_FAILURE;
             }
             left_c--;
-            number++;
         }
         if (left_u > 0) {
-            if (send_one(coid, number, SIGNAL_CLASS_URGENT) != 0) {
+            if (send_recorded(coid, &manifest, &recorded, &number,
+                              SIGNAL_CLASS_URGENT, gap_ms) != 0) {
                 name_close(coid);
                 return EXIT_FAILURE;
             }
             left_u--;
-            number++;
         }
     }
 
     /*
      * Drop below every class so the relay forward thread, still at its
      * own priority until it dequeues, can run and drain the queue.
+     * The manifest is not a signal: it is forwarded before the previous
+     * node is answered, so a death in the middle cannot swallow the list.
      */
     if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
         name_close(coid);
         return EXIT_FAILURE;
     }
+
+    manifest.count = (uint16_t)recorded;
+    alarm(MANIFEST_TIMEOUT_SECONDS);
+    sent = MsgSend(coid, &manifest, sizeof manifest, NULL, 0);
+    alarm(0);
+    if (sent == -1) {
+        fprintf(stderr, "source: sending the manifest failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    if (sent != EOK) {
+        fprintf(stderr, "source: the next node rejected the manifest with status %ld\n",
+                sent);
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    printf("source: sent manifest of %lu signals\n", recorded);
+    fflush(stdout);
 
     if (name_close(coid) == -1) {
         fprintf(stderr, "source: closing the connection to %s failed: %s\n",
