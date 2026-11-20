@@ -165,6 +165,7 @@ static void print_summary(const struct signal_ledger *ledger)
         unsigned on_time = 0;
         unsigned late = 0;
         unsigned lost = 0;
+        unsigned dropped = 0;
         unsigned number;
 
         for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
@@ -179,10 +180,13 @@ static void print_summary(const struct signal_ledger *ledger)
                 late++;
             } else if (ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
                 lost++;
+            } else if (ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
+                dropped++;
             }
         }
-        printf("sink: summary %s received %u, on time %u, late %u, lost %u\n",
-               signal_class_name(id), received, on_time, late, lost);
+        printf("sink: summary %s received %u, on time %u, late %u, lost %u, "
+               "dropped %u\n",
+               signal_class_name(id), received, on_time, late, lost, dropped);
     }
     printf("sink: unaccounted %u\n", signal_ledger_unaccounted(ledger));
     fflush(stdout);
@@ -250,6 +254,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "sink: the count must be 1..%d\n", SIGNAL_LEDGER_CAP);
         return EXIT_FAILURE;
     }
+    /*
+     * The count is only a limit check. The loop ends when the manifest
+     * arrives. Numbers the relay marked as dropped are closed from that
+     * manifest, so they do not have to show up as messages.
+     */
 
     if (install_alarm() == -1) {
         return EXIT_FAILURE;
@@ -386,6 +395,23 @@ int main(int argc, char **argv)
                 }
             }
             manifest_seen = 1;
+            for (item = 0; item < buffer.body.manifest.count; item++) {
+                struct signal_manifest_item *one = &buffer.body.manifest.item[item];
+
+                if (one->reserved != SIGNAL_MANIFEST_DROPPED) {
+                    continue;
+                }
+                if (signal_ledger_drop(&ledger, one->number) != 0) {
+                    fprintf(stderr,
+                            "sink: could not record dropped signal %" PRIu64 "\n",
+                            one->number);
+                    print_summary(&ledger);
+                    detach(attach);
+                    return EXIT_FAILURE;
+                }
+                show_state(&shown,
+                           net_machine_on_dropped(&machine, one->class_id));
+            }
             if (close_books(&ledger) != 0) {
                 fprintf(stderr, "sink: the manifest left a signal unaccounted\n");
                 print_summary(&ledger);
