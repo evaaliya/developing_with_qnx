@@ -46,6 +46,20 @@ static int push(struct signal_queue *q, uint64_t number, uint32_t class_id,
     return signal_queue_push(q, &sig, arrival_ns, arrival_order);
 }
 
+static int contains_number(const struct signal_queue *q, uint64_t number)
+{
+    size_t i;
+
+    for (i = 0; i < signal_queue_count(q); i++) {
+        const struct signal_queue_item *stored = signal_queue_item(q, i);
+
+        if (stored != NULL && stored->body.number == number) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     struct signal_queue q;
@@ -121,6 +135,74 @@ int main(void)
         }
     }
     expect_int("rejected signal is not stored", rc, 0);
+
+    signal_queue_init(&q);
+    expect_int("evict setup later background",
+               push(&q, 1, SIGNAL_CLASS_BACKGROUND, 100, 1), 0);
+    expect_int("evict setup earlier background",
+               push(&q, 2, SIGNAL_CLASS_BACKGROUND, 50, 2), 0);
+    expect_int("evict setup urgent",
+               push(&q, 3, SIGNAL_CLASS_URGENT, 200, 3), 0);
+    expect_int("evict setup command",
+               push(&q, 4, SIGNAL_CLASS_COMMAND, 300, 4), 0);
+    memset(&item, 0, sizeof item);
+    expect_int("evict the newest background",
+               signal_queue_evict_background(&q, &item), 0);
+    expect_u64("newest background is signal 1", item.body.number, 1);
+    expect_int("one background remains with both protected classes",
+               (int)signal_queue_count(&q), 3);
+    expect_int("earlier background stayed", contains_number(&q, 2), 1);
+    expect_int("urgent stayed after an eviction", contains_number(&q, 3), 1);
+    expect_int("command stayed after an eviction", contains_number(&q, 4), 1);
+    expect_int("evicted background is gone", contains_number(&q, 1), 0);
+    expect_int("evict the older background",
+               signal_queue_evict_background(&q, &item), 0);
+    expect_u64("older background is signal 2", item.body.number, 2);
+    item.body.number = 77;
+    expect_int("evict with no background refuses",
+               signal_queue_evict_background(&q, &item), -1);
+    expect_u64("a refusal leaves the output alone", item.body.number, 77);
+    expect_int("a refusal leaves the count", (int)signal_queue_count(&q), 2);
+    expect_int("urgent survived a refused eviction", contains_number(&q, 3), 1);
+    expect_int("command survived a refused eviction", contains_number(&q, 4), 1);
+    expect_int("pop still takes urgent first", signal_queue_pop(&q, &item), 0);
+    expect_u64("urgent was never evicted", item.body.number, 3);
+    expect_int("pop then takes command", signal_queue_pop(&q, &item), 0);
+    expect_u64("command was never evicted", item.body.number, 4);
+
+    signal_queue_init(&q);
+    expect_int("tie background order 1",
+               push(&q, 10, SIGNAL_CLASS_BACKGROUND, 5, 1), 0);
+    expect_int("tie background order 3",
+               push(&q, 30, SIGNAL_CLASS_BACKGROUND, 5, 3), 0);
+    expect_int("tie background order 2",
+               push(&q, 20, SIGNAL_CLASS_BACKGROUND, 5, 2), 0);
+    expect_int("tie urgent is later than every background",
+               push(&q, 40, SIGNAL_CLASS_URGENT, 9, 4), 0);
+    expect_int("equal time evicts the largest arrival order",
+               signal_queue_evict_background(&q, &item), 0);
+    expect_u64("largest arrival order is signal 30", item.body.number, 30);
+    expect_int("the urgent is still stored", contains_number(&q, 40), 1);
+    expect_int("smaller arrival orders stayed", contains_number(&q, 10), 1);
+
+    signal_queue_init(&q);
+    expect_int("protected urgent", push(&q, 8, SIGNAL_CLASS_URGENT, 1, 1), 0);
+    expect_int("protected command", push(&q, 9, SIGNAL_CLASS_COMMAND, 2, 2), 0);
+    item.body.number = 55;
+    expect_int("urgent and command alone are not evicted",
+               signal_queue_evict_background(&q, &item), -1);
+    expect_int("protected queue keeps its count", (int)signal_queue_count(&q), 2);
+    expect_u64("protected refusal leaves the output alone", item.body.number, 55);
+    expect_int("protected urgent stayed", contains_number(&q, 8), 1);
+    expect_int("protected command stayed", contains_number(&q, 9), 1);
+
+    signal_queue_init(&q);
+    item.body.number = 66;
+    expect_int("evict on an empty queue",
+               signal_queue_evict_background(&q, &item), -1);
+    expect_u64("empty eviction leaves the output alone", item.body.number, 66);
+    expect_int("null evict queue", signal_queue_evict_background(NULL, &item), -1);
+    expect_int("null evict output", signal_queue_evict_background(&q, NULL), -1);
 
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);

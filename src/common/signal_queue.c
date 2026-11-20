@@ -32,6 +32,27 @@ static int leaves_before(const struct signal_queue_item *a,
     return a->arrival_order < b->arrival_order;
 }
 
+/* Non-zero when a arrived after b. Same class is the caller's concern. */
+static int arrived_later(const struct signal_queue_item *a,
+                         const struct signal_queue_item *b)
+{
+    if (a->arrival_ns != b->arrival_ns) {
+        return a->arrival_ns > b->arrival_ns;
+    }
+    return a->arrival_order > b->arrival_order;
+}
+
+static void remove_at(struct signal_queue *q, size_t index)
+{
+    size_t i;
+
+    for (i = index + 1; i < q->count; i++) {
+        q->items[i - 1] = q->items[i];
+    }
+    q->count--;
+    memset(&q->items[q->count], 0, sizeof q->items[q->count]);
+}
+
 void signal_queue_init(struct signal_queue *q)
 {
     if (q == NULL) {
@@ -74,11 +95,36 @@ int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
     }
 
     *out = q->items[best];
-    for (i = best + 1; i < q->count; i++) {
-        q->items[i - 1] = q->items[i];
+    remove_at(q, best);
+    return 0;
+}
+
+int signal_queue_evict_background(struct signal_queue *q,
+                                  struct signal_queue_item *out)
+{
+    size_t best = 0;
+    size_t i;
+    int found = 0;
+
+    if (q == NULL || out == NULL || q->count == 0) {
+        return -1;
     }
-    q->count--;
-    memset(&q->items[q->count], 0, sizeof q->items[q->count]);
+
+    for (i = 0; i < q->count; i++) {
+        if (q->items[i].body.class_id != SIGNAL_CLASS_BACKGROUND) {
+            continue;
+        }
+        if (!found || arrived_later(&q->items[i], &q->items[best])) {
+            best = i;
+            found = 1;
+        }
+    }
+    if (!found) {
+        return -1;
+    }
+
+    *out = q->items[best];
+    remove_at(q, best);
     return 0;
 }
 

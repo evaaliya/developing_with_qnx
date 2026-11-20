@@ -4,7 +4,8 @@
 /*
  * Bounded queue of signals. No QNX headers and no clock: the caller
  * passes the arrival time and the arrival order. Not thread-safe.
- * Ordering and overflow are D-034.
+ * Ordering and a full push that changes nothing are D-034.
+ * Evicting the newest BACKGROUND is D-042. Push itself never evicts.
  */
 
 #include "signal_msg.h"
@@ -37,6 +38,15 @@ int signal_queue_push(struct signal_queue *q, const struct signal *sig,
  * 0 on success. -1 if q or out is NULL or the queue is empty.
  */
 int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out);
+
+/*
+ * Removes the newest BACKGROUND: larger arrival_ns, then larger
+ * arrival_order. URGENT and COMMAND stay. 0 on success. -1 if q or
+ * out is NULL, the queue is empty, or it holds no BACKGROUND.
+ * On -1 the queue and out are unchanged.
+ */
+int signal_queue_evict_background(struct signal_queue *q,
+                                  struct signal_queue_item *out);
 
 size_t signal_queue_count(const struct signal_queue *q);
 
