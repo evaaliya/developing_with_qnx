@@ -1,5 +1,7 @@
 #define _QNX_SOURCE
 
+#include "net_state.h"
+#include "signal_ledger.h"
 #include "signal_msg.h"
 #include "wire.h"
 
@@ -18,13 +20,19 @@
 
 _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
                "SIGNAL_MSG_TYPE is inside the reserved system message range");
+_Static_assert(SIGNAL_MANIFEST_CAP == SIGNAL_LEDGER_CAP,
+               "the manifest and the ledger cover different numbers");
 
-#define RECEIVE_TIMEOUT_SECONDS 5u
+#define SAFETY_SECONDS 45u
+#define DEFAULT_GAP_MS 1000ul
 
-struct class_tally {
-    unsigned long received;
-    unsigned long on_time;
-    unsigned long late;
+struct receive_buffer {
+    union {
+        struct _pulse pulse;
+        struct signal_message message;
+        struct signal_manifest manifest;
+        struct signal_lock lock;
+    } body;
 };
 
 static void on_alarm(int signo)
@@ -83,7 +91,7 @@ static int reject(rcvid_t rcvid, int error, const char *what)
     return 0;
 }
 
-static int parse_count(const char *text, unsigned long *out)
+static int parse_count(const char *text, unsigned long *out, int allow_zero)
 {
     char *end = NULL;
     unsigned long value;
@@ -93,15 +101,28 @@ static int parse_count(const char *text, unsigned long *out)
     }
     errno = 0;
     value = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || errno != 0 || value == 0) {
+    if (end == text || *end != '\0' || errno != 0) {
+        return -1;
+    }
+    if (!allow_zero && value == 0) {
         return -1;
     }
     *out = value;
     return 0;
 }
 
+static void show_state(enum net_state *shown, enum net_state now)
+{
+    if (*shown == now) {
+        return;
+    }
+    *shown = now;
+    printf("sink: state %s\n", net_state_name(now));
+    fflush(stdout);
+}
+
 static void print_signal(const struct signal *sig, enum signal_verdict verdict,
-                         int64_t now_ns)
+                         enum net_presentation presentation, int64_t now_ns)
 {
     int64_t prev = sig->issued_ns;
     uint32_t i;
@@ -111,9 +132,15 @@ static void print_signal(const struct signal *sig, enum signal_verdict verdict,
         hops = SIGNAL_MAX_HOPS;
     }
 
-    printf("sink: signal %" PRIu64 " class %s %s, hops",
+    printf("sink: signal %" PRIu64 " class %s %s",
            sig->number, signal_class_name(sig->class_id),
            signal_verdict_name(verdict));
+    if (presentation == NET_PRESENT_FRESH) {
+        printf(", fresh");
+    } else if (verdict == SIGNAL_ON_TIME) {
+        printf(", held");
+    }
+    printf(", hops");
     for (i = 0; i < hops; i++) {
         printf(" %" PRId64 " ns,", sig->hop_ns[i] - prev);
         prev = sig->hop_ns[i];
@@ -123,7 +150,7 @@ static void print_signal(const struct signal *sig, enum signal_verdict verdict,
     fflush(stdout);
 }
 
-static void print_summary(const struct class_tally *tally, unsigned long unknown)
+static void print_summary(const struct signal_ledger *ledger)
 {
     static const uint32_t classes[] = {
         SIGNAL_CLASS_URGENT,
@@ -134,47 +161,93 @@ static void print_summary(const struct class_tally *tally, unsigned long unknown
 
     for (i = 0; i < sizeof classes / sizeof classes[0]; i++) {
         uint32_t id = classes[i];
-        printf("sink: summary %s received %lu, on time %lu, late %lu\n",
-               signal_class_name(id), tally[id].received, tally[id].on_time,
-               tally[id].late);
+        unsigned received = 0;
+        unsigned on_time = 0;
+        unsigned late = 0;
+        unsigned lost = 0;
+        unsigned number;
+
+        for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
+            if (ledger->class_id[number] != id) {
+                continue;
+            }
+            if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME) {
+                received++;
+                on_time++;
+            } else if (ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
+                received++;
+                late++;
+            } else if (ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
+                lost++;
+            }
+        }
+        printf("sink: summary %s received %u, on time %u, late %u, lost %u\n",
+               signal_class_name(id), received, on_time, late, lost);
     }
-    if (unknown > 0) {
-        printf("sink: summary unknown received %lu\n", unknown);
-    }
+    printf("sink: unaccounted %u\n", signal_ledger_unaccounted(ledger));
     fflush(stdout);
 }
 
-static void add_tally(struct class_tally *tally, unsigned long *unknown,
-                      uint32_t class_id, enum signal_verdict verdict)
+static void print_lost(const struct signal_ledger *ledger, uint64_t number)
 {
-    if (class_id != SIGNAL_CLASS_URGENT &&
-        class_id != SIGNAL_CLASS_COMMAND &&
-        class_id != SIGNAL_CLASS_BACKGROUND) {
-        (*unknown)++;
-        return;
+    printf("sink: lost signal %" PRIu64 " class %s\n",
+           number, signal_class_name(ledger->class_id[number]));
+    fflush(stdout);
+}
+
+static int close_books(struct signal_ledger *ledger)
+{
+    unsigned number;
+
+    for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
+        if (!ledger->issued[number] ||
+            ledger->account[number] != SIGNAL_ACCOUNT_NONE) {
+            continue;
+        }
+        if (signal_ledger_lose(ledger, number, ledger->class_id[number]) != 0) {
+            return -1;
+        }
+        print_lost(ledger, number);
     }
-    tally[class_id].received++;
-    if (verdict == SIGNAL_ON_TIME) {
-        tally[class_id].on_time++;
-    } else {
-        tally[class_id].late++;
+    return signal_ledger_unaccounted(ledger) == 0 ? 0 : -1;
+}
+
+static int arm_receive(uint64_t gap_ns)
+{
+    /*
+     * TimerTimeout is one-shot and is cleared by the next kernel call,
+     * so it sits immediately in front of MsgReceive.
+     */
+    if (TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_RECEIVE, NULL, &gap_ns,
+                     NULL) == -1) {
+        fprintf(stderr, "sink: arming the urgent-pulse timeout failed: %s\n",
+                strerror(errno));
+        return -1;
     }
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
     name_attach_t *attach;
-    struct class_tally tally[4];
+    struct signal_ledger ledger;
+    struct net_machine machine;
+    struct receive_buffer buffer;
+    enum net_state shown = NET_LOCKED_SAFE;
     unsigned long expected;
-    unsigned long received = 0;
-    unsigned long unknown = 0;
-    union {
-        struct _pulse pulse;
-        struct signal_message message;
-    } buffer;
+    unsigned long gap_ms = DEFAULT_GAP_MS;
+    int64_t gap_ns;
+    int finished = 0;
+    int manifest_seen = 0;
 
-    if (argc != 2 || parse_count(argv[1], &expected) != 0) {
-        fprintf(stderr, "usage: sink <signal-count>\n");
+    if ((argc != 2 && argc != 3) ||
+        parse_count(argv[1], &expected, 0) != 0 ||
+        (argc == 3 && parse_count(argv[2], &gap_ms, 0) != 0)) {
+        fprintf(stderr, "usage: sink <signal-count> [urgent-gap-ms]\n");
+        return EXIT_FAILURE;
+    }
+    if (expected > SIGNAL_LEDGER_CAP) {
+        fprintf(stderr, "sink: the count must be 1..%d\n", SIGNAL_LEDGER_CAP);
         return EXIT_FAILURE;
     }
 
@@ -182,7 +255,10 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    memset(tally, 0, sizeof tally);
+    signal_ledger_init(&ledger);
+    gap_ns = (int64_t)gap_ms * 1000000LL;
+    net_machine_init(&machine, monotonic_ns(), gap_ns, NET_RECOVER_URGENT_NEED);
+    show_state(&shown, machine.state);
 
     attach = name_attach(NULL, SIGNAL_ATTACH_NAME, 0);
     if (attach == NULL) {
@@ -191,42 +267,53 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    alarm(RECEIVE_TIMEOUT_SECONDS);
-    while (received < expected) {
+    alarm(SAFETY_SECONDS);
+    while (!finished) {
         struct _msg_info info;
         rcvid_t rcvid;
         enum signal_verdict verdict;
-        struct signal_reply reply;
+        enum net_presentation presentation = NET_PRESENT_HELD;
         int64_t now_ns;
-        int64_t transit_ns;
+
+        now_ns = monotonic_ns();
+        if (now_ns > machine.next_urgent_due_ns) {
+            show_state(&shown, net_machine_on_tick(&machine, now_ns));
+        }
+        if (arm_receive((uint64_t)gap_ns) != 0) {
+            print_summary(&ledger);
+            detach(attach);
+            return EXIT_FAILURE;
+        }
 
         memset(&buffer, 0, sizeof buffer);
         memset(&info, 0, sizeof info);
         rcvid = MsgReceive(attach->chid, &buffer, sizeof buffer, &info);
         if (rcvid == -1) {
+            if (errno == ETIMEDOUT) {
+                continue;
+            }
             if (errno == EINTR) {
                 fprintf(stderr,
-                        "sink: stopped after %lu of %lu signals, nothing "
-                        "arrived for %u seconds\n",
-                        received, expected, RECEIVE_TIMEOUT_SECONDS);
+                        "sink: stopped, nothing closed the books for %u seconds\n",
+                        SAFETY_SECONDS);
             } else {
                 fprintf(stderr, "sink: waiting for a signal failed: %s\n",
                         strerror(errno));
             }
-            print_summary(tally, unknown);
+            print_summary(&ledger);
             detach(attach);
             return EXIT_FAILURE;
         }
 
         if (rcvid == 0) {
-            if (buffer.pulse.code == _PULSE_CODE_DISCONNECT) {
-                if (ConnectDetach(buffer.pulse.scoid) == -1) {
+            if (buffer.body.pulse.code == _PULSE_CODE_DISCONNECT) {
+                if (ConnectDetach(buffer.body.pulse.scoid) == -1) {
                     fprintf(stderr,
                             "sink: detaching a departed client failed: %s\n",
                             strerror(errno));
                 }
-            } else if (buffer.pulse.code == _PULSE_CODE_UNBLOCK) {
-                if (MsgError(buffer.pulse.value.sival_int, EINTR) == -1) {
+            } else if (buffer.body.pulse.code == _PULSE_CODE_UNBLOCK) {
+                if (MsgError(buffer.body.pulse.value.sival_int, EINTR) == -1) {
                     fprintf(stderr,
                             "sink: releasing a client that asked to unblock "
                             "failed: %s\n",
@@ -237,25 +324,88 @@ int main(int argc, char **argv)
         }
 
         if (info.msglen < (ssize_t)sizeof(uint16_t) ||
-            buffer.message.type <= _IO_MAX) {
+            buffer.body.message.type <= _IO_MAX) {
             if (reject(rcvid, ENOSYS, "rejecting a system message failed") == -1) {
-                print_summary(tally, unknown);
+                print_summary(&ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
             continue;
         }
 
-        if (buffer.message.type != SIGNAL_MSG_TYPE ||
+        if (buffer.body.message.type == SIGNAL_MSG_LOCK &&
+            info.msglen >= (ssize_t)sizeof(struct signal_lock)) {
+            show_state(&shown, net_machine_on_lock(&machine));
+            if (!manifest_seen) {
+                printf("sink: manifest did not arrive; this summary is only "
+                       "signals sink saw\n");
+            }
+            print_summary(&ledger);
+            fflush(stdout);
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "sink: replying to the lock failed: %s\n",
+                        strerror(errno));
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            detach(attach);
+            alarm(0);
+            return EXIT_SUCCESS;
+        }
+
+        if (buffer.body.message.type == SIGNAL_MSG_MANIFEST &&
+            info.msglen >= (ssize_t)sizeof(struct signal_manifest)) {
+            unsigned item;
+
+            if (buffer.body.manifest.count > SIGNAL_MANIFEST_CAP) {
+                if (reject(rcvid, EINVAL, "rejecting the manifest failed") == -1) {
+                    print_summary(&ledger);
+                    detach(attach);
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "sink: replying to the manifest failed: %s\n",
+                        strerror(errno));
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            for (item = 0; item < buffer.body.manifest.count; item++) {
+                struct signal_manifest_item *one = &buffer.body.manifest.item[item];
+
+                if (signal_ledger_issue(&ledger, one->number, one->class_id) != 0) {
+                    fprintf(stderr,
+                            "sink: manifest repeats signal %" PRIu64 " or uses a "
+                            "number outside 1..%d\n",
+                            one->number, SIGNAL_LEDGER_CAP);
+                    print_summary(&ledger);
+                    detach(attach);
+                    return EXIT_FAILURE;
+                }
+            }
+            manifest_seen = 1;
+            if (close_books(&ledger) != 0) {
+                fprintf(stderr, "sink: the manifest left a signal unaccounted\n");
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            finished = 1;
+            continue;
+        }
+
+        if (buffer.body.message.type != SIGNAL_MSG_TYPE ||
             info.msglen < (ssize_t)sizeof(struct signal_message) ||
-            buffer.message.body.hop_count > SIGNAL_MAX_HOPS) {
+            buffer.body.message.body.hop_count > SIGNAL_MAX_HOPS) {
             fprintf(stderr,
                     "sink: the message is not a signal (type %u, %lld bytes, "
                     "hop count %u)\n",
-                    buffer.message.type, (long long)info.msglen,
-                    buffer.message.body.hop_count);
+                    buffer.body.message.type, (long long)info.msglen,
+                    buffer.body.message.body.hop_count);
             if (reject(rcvid, EINVAL, "rejecting that message failed") == -1) {
-                print_summary(tally, unknown);
+                print_summary(&ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -263,29 +413,30 @@ int main(int argc, char **argv)
         }
 
         now_ns = monotonic_ns();
-        verdict = signal_check(&buffer.message.body, now_ns);
-        transit_ns = now_ns - buffer.message.body.issued_ns;
-
-        memset(&reply, 0, sizeof reply);
-        reply.verdict = (int32_t)verdict;
-        reply.received_ns = now_ns;
-        reply.transit_ns = transit_ns;
-        if (MsgReply(rcvid, EOK, &reply, sizeof reply) == -1) {
+        verdict = signal_check(&buffer.body.message.body, now_ns);
+        if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
             fprintf(stderr, "sink: replying to the sender failed: %s\n",
                     strerror(errno));
-            print_summary(tally, unknown);
+            print_summary(&ledger);
             detach(attach);
             return EXIT_FAILURE;
         }
 
-        print_signal(&buffer.message.body, verdict, now_ns);
-        add_tally(tally, &unknown, buffer.message.body.class_id, verdict);
-        received++;
-        alarm(RECEIVE_TIMEOUT_SECONDS);
+        if (signal_ledger_receive(&ledger, buffer.body.message.body.number,
+                                  buffer.body.message.body.class_id,
+                                  verdict) != 0) {
+            fprintf(stderr, "sink: signal %" PRIu64 " was already accounted\n",
+                    buffer.body.message.body.number);
+            continue;
+        }
+        net_machine_on_signal(&machine, buffer.body.message.body.class_id,
+                              verdict, now_ns, &presentation);
+        print_signal(&buffer.body.message.body, verdict, presentation, now_ns);
+        show_state(&shown, machine.state);
     }
 
     alarm(0);
-    print_summary(tally, unknown);
+    print_summary(&ledger);
     detach(attach);
     return EXIT_SUCCESS;
 }
