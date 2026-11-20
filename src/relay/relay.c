@@ -34,6 +34,7 @@ struct relay {
     uint64_t next_order;
     int own_priority;
     int next_coid;
+    int link_down;
     int manifest_waiting;
     rcvid_t manifest_rcvid;
     struct signal_manifest manifest;
@@ -210,11 +211,13 @@ static void send_failed(struct relay *node, int coid, const struct signal *curre
     pthread_mutex_lock(&node->lock);
     drain_lost_locked(node);
     node->next_coid = -1;
+    node->link_down = 1;
     pthread_mutex_unlock(&node->lock);
     close_quietly(node, coid);
     fresh = reopen_next(node);
     pthread_mutex_lock(&node->lock);
     node->next_coid = fresh;
+    node->link_down = 0;
     pthread_cond_signal(&node->ready);
     pthread_mutex_unlock(&node->lock);
 }
@@ -259,6 +262,7 @@ static void *forward_main(void *arg)
     }
     pthread_mutex_lock(&node->lock);
     node->next_coid = coid;
+    node->link_down = 0;
     pthread_mutex_unlock(&node->lock);
 
     for (;;) {
@@ -285,6 +289,7 @@ static void *forward_main(void *arg)
             coid = reopen_next(node);
             pthread_mutex_lock(&node->lock);
             node->next_coid = coid;
+            node->link_down = 0;
             pthread_mutex_unlock(&node->lock);
             continue;
         }
@@ -393,6 +398,10 @@ static int enqueue(struct relay *node, const struct signal *sig, int64_t arrival
     int rc;
 
     pthread_mutex_lock(&node->lock);
+    if (node->link_down) {
+        pthread_mutex_unlock(&node->lock);
+        return 1;
+    }
     rc = signal_queue_push(&node->queue, sig, arrival_ns, node->next_order);
     if (rc == 0) {
         node->next_order++;
@@ -600,6 +609,7 @@ int main(int argc, char **argv)
                     if (coid == node.next_coid) {
                         closed = node.next_coid;
                         node.next_coid = -1;
+                        node.link_down = 1;
                         pthread_cond_signal(&node.ready);
                     }
                     pthread_mutex_unlock(&node.lock);
@@ -712,6 +722,24 @@ int main(int argc, char **argv)
 
         pthread_mutex_lock(&node.lock);
         full = signal_queue_count(&node.queue) >= node.capacity;
+        /*
+         * next_coid is -1 until the first name_open. That is not a
+         * broken link: the burst has to sit in the queue. link_down is
+         * set only after a connection that already existed has failed.
+         */
+        if (node.link_down) {
+            pthread_mutex_unlock(&node.lock);
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "relay %s: replying to the sender failed: %s\n",
+                        node.own_name, strerror(errno));
+                return EXIT_FAILURE;
+            }
+            if (set_fifo(node.own_name, node.own_priority) != 0) {
+                return EXIT_FAILURE;
+            }
+            write_lost(&node, &buffer.message.body);
+            continue;
+        }
         if (full &&
             buffer.message.body.class_id == SIGNAL_CLASS_BACKGROUND) {
             pthread_mutex_unlock(&node.lock);
@@ -772,19 +800,20 @@ int main(int argc, char **argv)
         if (set_fifo(node.own_name, node.own_priority) != 0) {
             return EXIT_FAILURE;
         }
-        pthread_mutex_lock(&node.lock);
-        if (node.next_coid < 0) {
-            pthread_mutex_unlock(&node.lock);
-            write_lost(&node, &stamped);
-            continue;
-        }
-        pthread_mutex_unlock(&node.lock);
-        if (enqueue(&node, &stamped, now_ns) != 0) {
-            fprintf(stderr,
-                    "relay %s: signal %" PRIu64 " was accepted but did not fit "
-                    "in the queue\n",
-                    node.own_name, stamped.number);
-            return EXIT_FAILURE;
+        {
+            int queued = enqueue(&node, &stamped, now_ns);
+
+            if (queued > 0) {
+                write_lost(&node, &stamped);
+                continue;
+            }
+            if (queued != 0) {
+                fprintf(stderr,
+                        "relay %s: signal %" PRIu64 " was accepted but did not fit "
+                        "in the queue\n",
+                        node.own_name, stamped.number);
+                return EXIT_FAILURE;
+            }
         }
     }
 }
