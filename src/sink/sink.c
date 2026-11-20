@@ -21,6 +21,12 @@ _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
 
 #define RECEIVE_TIMEOUT_SECONDS 5u
 
+struct class_tally {
+    unsigned long received;
+    unsigned long on_time;
+    unsigned long late;
+};
+
 static void on_alarm(int signo)
 {
     (void)signo;
@@ -77,17 +83,106 @@ static int reject(rcvid_t rcvid, int error, const char *what)
     return 0;
 }
 
-int main(void)
+static int parse_count(const char *text, unsigned long *out)
+{
+    char *end = NULL;
+    unsigned long value;
+
+    if (text == NULL || text[0] < '0' || text[0] > '9') {
+        return -1;
+    }
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || errno != 0 || value == 0) {
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+static void print_signal(const struct signal *sig, enum signal_verdict verdict,
+                         int64_t now_ns)
+{
+    int64_t prev = sig->issued_ns;
+    uint32_t i;
+    uint32_t hops = sig->hop_count;
+
+    if (hops > SIGNAL_MAX_HOPS) {
+        hops = SIGNAL_MAX_HOPS;
+    }
+
+    printf("sink: signal %" PRIu64 " class %s %s, hops",
+           sig->number, signal_class_name(sig->class_id),
+           signal_verdict_name(verdict));
+    for (i = 0; i < hops; i++) {
+        printf(" %" PRId64 " ns,", sig->hop_ns[i] - prev);
+        prev = sig->hop_ns[i];
+    }
+    printf(" %" PRId64 " ns, total %" PRId64 " ns\n",
+           now_ns - prev, now_ns - sig->issued_ns);
+    fflush(stdout);
+}
+
+static void print_summary(const struct class_tally *tally, unsigned long unknown)
+{
+    static const uint32_t classes[] = {
+        SIGNAL_CLASS_URGENT,
+        SIGNAL_CLASS_COMMAND,
+        SIGNAL_CLASS_BACKGROUND
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof classes / sizeof classes[0]; i++) {
+        uint32_t id = classes[i];
+        printf("sink: summary %s received %lu, on time %lu, late %lu\n",
+               signal_class_name(id), tally[id].received, tally[id].on_time,
+               tally[id].late);
+    }
+    if (unknown > 0) {
+        printf("sink: summary unknown received %lu\n", unknown);
+    }
+    fflush(stdout);
+}
+
+static void add_tally(struct class_tally *tally, unsigned long *unknown,
+                      uint32_t class_id, enum signal_verdict verdict)
+{
+    if (class_id != SIGNAL_CLASS_URGENT &&
+        class_id != SIGNAL_CLASS_COMMAND &&
+        class_id != SIGNAL_CLASS_BACKGROUND) {
+        (*unknown)++;
+        return;
+    }
+    tally[class_id].received++;
+    if (verdict == SIGNAL_ON_TIME) {
+        tally[class_id].on_time++;
+    } else {
+        tally[class_id].late++;
+    }
+}
+
+int main(int argc, char **argv)
 {
     name_attach_t *attach;
+    struct class_tally tally[4];
+    unsigned long expected;
+    unsigned long received = 0;
+    unsigned long unknown = 0;
     union {
         struct _pulse pulse;
         struct signal_message message;
     } buffer;
 
+    if (argc != 2 || parse_count(argv[1], &expected) != 0) {
+        fprintf(stderr, "usage: sink <signal-count>\n");
+        return EXIT_FAILURE;
+    }
+
     if (install_alarm() == -1) {
         return EXIT_FAILURE;
     }
+
+    memset(tally, 0, sizeof tally);
 
     attach = name_attach(NULL, SIGNAL_ATTACH_NAME, 0);
     if (attach == NULL) {
@@ -97,7 +192,7 @@ int main(void)
     }
 
     alarm(RECEIVE_TIMEOUT_SECONDS);
-    for (;;) {
+    while (received < expected) {
         struct _msg_info info;
         rcvid_t rcvid;
         enum signal_verdict verdict;
@@ -110,12 +205,15 @@ int main(void)
         rcvid = MsgReceive(attach->chid, &buffer, sizeof buffer, &info);
         if (rcvid == -1) {
             if (errno == EINTR) {
-                fprintf(stderr, "sink: no signal arrived within %u seconds\n",
-                        RECEIVE_TIMEOUT_SECONDS);
+                fprintf(stderr,
+                        "sink: stopped after %lu of %lu signals, nothing "
+                        "arrived for %u seconds\n",
+                        received, expected, RECEIVE_TIMEOUT_SECONDS);
             } else {
                 fprintf(stderr, "sink: waiting for a signal failed: %s\n",
                         strerror(errno));
             }
+            print_summary(tally, unknown);
             detach(attach);
             return EXIT_FAILURE;
         }
@@ -141,6 +239,7 @@ int main(void)
         if (info.msglen < (ssize_t)sizeof(uint16_t) ||
             buffer.message.type <= _IO_MAX) {
             if (reject(rcvid, ENOSYS, "rejecting a system message failed") == -1) {
+                print_summary(tally, unknown);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -148,20 +247,21 @@ int main(void)
         }
 
         if (buffer.message.type != SIGNAL_MSG_TYPE ||
-            info.msglen < (ssize_t)sizeof(struct signal_message)) {
+            info.msglen < (ssize_t)sizeof(struct signal_message) ||
+            buffer.message.body.hop_count > SIGNAL_MAX_HOPS) {
             fprintf(stderr,
                     "sink: the message is not a signal (type %u, %lld bytes, "
-                    "need type %u and %zu bytes)\n",
+                    "hop count %u)\n",
                     buffer.message.type, (long long)info.msglen,
-                    SIGNAL_MSG_TYPE, sizeof(struct signal_message));
+                    buffer.message.body.hop_count);
             if (reject(rcvid, EINVAL, "rejecting that message failed") == -1) {
+                print_summary(tally, unknown);
                 detach(attach);
                 return EXIT_FAILURE;
             }
             continue;
         }
 
-        alarm(0);
         now_ns = monotonic_ns();
         verdict = signal_check(&buffer.message.body, now_ns);
         transit_ns = now_ns - buffer.message.body.issued_ns;
@@ -173,16 +273,19 @@ int main(void)
         if (MsgReply(rcvid, EOK, &reply, sizeof reply) == -1) {
             fprintf(stderr, "sink: replying to the sender failed: %s\n",
                     strerror(errno));
+            print_summary(tally, unknown);
             detach(attach);
             return EXIT_FAILURE;
         }
 
-        printf("sink: signal %" PRIu64 " class %s %s, transit %" PRId64 " ns\n",
-               buffer.message.body.number,
-               signal_class_name(buffer.message.body.class_id),
-               signal_verdict_name(verdict), transit_ns);
-        fflush(stdout);
-        detach(attach);
-        return EXIT_SUCCESS;
+        print_signal(&buffer.message.body, verdict, now_ns);
+        add_tally(tally, &unknown, buffer.message.body.class_id, verdict);
+        received++;
+        alarm(RECEIVE_TIMEOUT_SECONDS);
     }
+
+    alarm(0);
+    print_summary(tally, unknown);
+    detach(attach);
+    return EXIT_SUCCESS;
 }

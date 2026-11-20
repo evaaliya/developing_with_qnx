@@ -2,10 +2,11 @@
 #define SIGNAL_WIRE_H
 
 /*
- * Bytes sent from source to sink. No QNX headers: both processes
- * compile this with the same compiler, and each checks that
+ * Bytes sent along source, relay, and sink. No QNX headers: every
+ * process compiles this with the same compiler, and each checks that
  * SIGNAL_MSG_TYPE is above _IO_MAX (0x1FF in sys/iomsg.h, described
  * as 0..511 on the QNX 8.0 name_attach page).
+ * The signal body carries the hop stamps relays add (D-035).
  */
 
 #include "signal_msg.h"

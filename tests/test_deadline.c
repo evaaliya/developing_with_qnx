@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int failures;
 
@@ -23,9 +24,10 @@ static struct signal make_signal(int64_t issued_ns, int64_t deadline_ns)
 
     sig.number = 1;
     sig.class_id = SIGNAL_CLASS_COMMAND;
-    sig.reserved = 0;
+    sig.hop_count = 0;
     sig.issued_ns = issued_ns;
     sig.deadline_ns = deadline_ns;
+    memset(sig.hop_ns, 0, sizeof sig.hop_ns);
     return sig;
 }
 

@@ -21,12 +21,16 @@ enum signal_verdict {
     SIGNAL_LATE = 1
 };
 
+/* Stamps a relay adds. The sink turns neighbours into per-hop times. */
+#define SIGNAL_MAX_HOPS 4
+
 struct signal {
     uint64_t number;
     uint32_t class_id;
-    uint32_t reserved;
+    uint32_t hop_count;
     int64_t issued_ns;
     int64_t deadline_ns;
+    int64_t hop_ns[SIGNAL_MAX_HOPS];
 };
 
 /*

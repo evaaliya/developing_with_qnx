@@ -12,6 +12,10 @@ SCP := scp -P 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 
 .PHONY: default all clean upload run test
 
+CHAIN_URGENT := 3
+CHAIN_COMMAND := 3
+CHAIN_BACKGROUND := 3
+
 default:
 	mkdir -p build
 	docker exec qnx-build "$(PROJECT_DIR)/build.sh"
@@ -22,27 +26,43 @@ test:
 	mkdir -p build
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-deadline \
 		tests/test_deadline.c src/common/signal_msg.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-queue \
+		tests/test_queue.c src/common/signal_queue.c
 	./build/test-deadline
+	./build/test-queue
 
 clean:
 	rm -rf build
 	rm -f my-project
 
 upload: default
-	$(SSH) root@localhost "slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-	$(SCP) ./build/source ./build/sink root@localhost:/tmp/
+	$(SSH) root@localhost "slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+	$(SCP) ./build/source ./build/sink ./build/relay root@localhost:/tmp/
 
 run: upload
-	$(SSH) root@localhost 'chmod +x /tmp/source /tmp/sink; \
-	  /tmp/sink > /tmp/sink.out 2>&1 & \
+	$(SSH) root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
+	  total=$$(($(CHAIN_URGENT) + $(CHAIN_COMMAND) + $(CHAIN_BACKGROUND))); \
+	  /tmp/sink $$total > /tmp/sink.out 2>&1 & \
 	  sink_pid=$$!; \
-	  /tmp/source > /tmp/source.out 2>&1; \
+	  /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 & \
+	  relay_b=$$!; \
+	  /tmp/relay signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 & \
+	  relay_a=$$!; \
+	  /tmp/source $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) signal-relay-a > /tmp/source.out 2>&1; \
 	  source_status=$$?; \
-	  if [ "$$source_status" -ne 0 ]; then slay -Q -f sink >/dev/null 2>&1 || true; fi; \
 	  sink_status=0; \
 	  wait $$sink_pid || sink_status=$$?; \
+	  slay -Q -f relay >/dev/null 2>&1 || true; \
+	  slay -Q -f source >/dev/null 2>&1 || true; \
+	  slay -Q -f sink >/dev/null 2>&1 || true; \
+	  wait $$relay_a >/dev/null 2>&1 || true; \
+	  wait $$relay_b >/dev/null 2>&1 || true; \
 	  echo "--- source (exit $$source_status) ---"; \
 	  cat /tmp/source.out; \
+	  echo "--- relay A ---"; \
+	  cat /tmp/relay-a.out; \
+	  echo "--- relay B ---"; \
+	  cat /tmp/relay-b.out; \
 	  echo "--- sink (exit $$sink_status) ---"; \
 	  cat /tmp/sink.out; \
 	  if [ "$$source_status" -ne 0 ]; then exit "$$source_status"; fi; \
