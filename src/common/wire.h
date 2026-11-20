@@ -20,6 +20,9 @@
 
 #define SIGNAL_MANIFEST_CAP 64
 
+/* Set on a manifest item the relay dropped. Other reserved values stay. */
+#define SIGNAL_MANIFEST_DROPPED ((uint32_t)1)
+
 struct signal_manifest_item {
     uint64_t number;
     uint32_t class_id;

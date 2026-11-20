@@ -37,6 +37,9 @@ struct relay {
     int manifest_waiting;
     rcvid_t manifest_rcvid;
     struct signal_manifest manifest;
+    size_t capacity;
+    uint64_t dropped[SIGNAL_MANIFEST_CAP];
+    unsigned dropped_count;
 };
 
 static int set_fifo(const char *who, int priority)
@@ -117,6 +120,43 @@ static void write_lost(const struct relay *node, const struct signal *sig)
     printf("relay %s: lost signal %" PRIu64 " class %s\n",
            node->own_name, sig->number, signal_class_name(sig->class_id));
     fflush(stdout);
+}
+
+/* Receive thread only. The forward thread reads the marked manifest. */
+static void note_drop(struct relay *node, uint64_t number)
+{
+    printf("relay %s: dropped signal %" PRIu64 " class BACKGROUND\n",
+           node->own_name, number);
+    fflush(stdout);
+    if (node->dropped_count >= SIGNAL_MANIFEST_CAP) {
+        fprintf(stderr,
+                "relay %s: the dropped list is full, signal %" PRIu64
+                " will not be marked on the manifest\n",
+                node->own_name, number);
+        return;
+    }
+    node->dropped[node->dropped_count++] = number;
+}
+
+static void mark_dropped(struct relay *node, struct signal_manifest *manifest)
+{
+    uint16_t i;
+    uint16_t count = manifest->count;
+
+    if (count > SIGNAL_MANIFEST_CAP) {
+        count = SIGNAL_MANIFEST_CAP;
+    }
+    for (i = 0; i < count; i++) {
+        unsigned d;
+
+        for (d = 0; d < node->dropped_count; d++) {
+            if (manifest->item[i].number != node->dropped[d]) {
+                continue;
+            }
+            manifest->item[i].reserved = SIGNAL_MANIFEST_DROPPED;
+            break;
+        }
+    }
 }
 
 /* The caller holds node->lock. */
@@ -376,6 +416,65 @@ static int name_ok(const char *name)
     return 1;
 }
 
+static int parse_u(const char *text, unsigned long *out)
+{
+    char *end = NULL;
+    unsigned long value;
+
+    if (text == NULL || text[0] < '0' || text[0] > '9') {
+        return -1;
+    }
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (end == text || *end != '\0' || errno != 0) {
+        return -1;
+    }
+    *out = value;
+    return 0;
+}
+
+static int parse_relay_args(int argc, char **argv, const char **own,
+                            const char **next, size_t *capacity)
+{
+    const char *names[2];
+    int name_count = 0;
+    int got_q = 0;
+    unsigned long value = SIGNAL_QUEUE_CAP;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-q") == 0) {
+            if (got_q || i + 1 >= argc) {
+                fprintf(stderr,
+                        "usage: relay <attach-name> <next-name> [-q N]\n");
+                return -1;
+            }
+            i++;
+            if (parse_u(argv[i], &value) != 0 || value < 1 ||
+                value > SIGNAL_QUEUE_CAP) {
+                fprintf(stderr, "relay: queue capacity must be 1..%d\n",
+                        SIGNAL_QUEUE_CAP);
+                return -1;
+            }
+            got_q = 1;
+            continue;
+        }
+        if (name_count >= 2 || !name_ok(argv[i])) {
+            fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N]\n");
+            return -1;
+        }
+        names[name_count++] = argv[i];
+    }
+    if (name_count != 2) {
+        fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N]\n");
+        return -1;
+    }
+    *own = names[0];
+    *next = names[1];
+    *capacity = (size_t)value;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct relay node;
@@ -389,14 +488,18 @@ int main(int argc, char **argv)
         struct signal_manifest manifest;
     } buffer;
 
-    if (argc != 3 || !name_ok(argv[1]) || !name_ok(argv[2])) {
-        fprintf(stderr, "usage: relay <attach-name> <next-name>\n");
+    const char *own_name;
+    const char *next_name;
+    size_t capacity;
+
+    if (parse_relay_args(argc, argv, &own_name, &next_name, &capacity) != 0) {
         return EXIT_FAILURE;
     }
 
     memset(&node, 0, sizeof node);
-    node.own_name = argv[1];
-    node.next_name = argv[2];
+    node.own_name = own_name;
+    node.next_name = next_name;
+    node.capacity = capacity;
     node.next_coid = -1;
     signal_queue_init(&node.queue);
     pthread_mutex_init(&node.lock, NULL);
@@ -550,6 +653,7 @@ int main(int argc, char **argv)
                 continue;
             }
             node.manifest = buffer.manifest;
+            mark_dropped(&node, &node.manifest);
             node.manifest_rcvid = rcvid;
             node.manifest_waiting = 1;
             pthread_cond_signal(&node.ready);
@@ -607,20 +711,51 @@ int main(int argc, char **argv)
         }
 
         pthread_mutex_lock(&node.lock);
-        full = signal_queue_count(&node.queue) >= SIGNAL_QUEUE_CAP;
-        pthread_mutex_unlock(&node.lock);
-        if (full) {
-            fprintf(stderr,
-                    "relay %s: queue is full, rejecting signal %" PRIu64 "\n",
-                    node.own_name, buffer.message.body.number);
-            if (reject(node.own_name, rcvid, EAGAIN,
-                       "rejecting a signal because the queue is full failed") != 0) {
+        full = signal_queue_count(&node.queue) >= node.capacity;
+        if (full &&
+            buffer.message.body.class_id == SIGNAL_CLASS_BACKGROUND) {
+            pthread_mutex_unlock(&node.lock);
+            /* EOK: source stops the run on any other status (D-042). */
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "relay %s: replying to the sender failed: %s\n",
+                        node.own_name, strerror(errno));
                 return EXIT_FAILURE;
             }
             if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }
+            note_drop(&node, buffer.message.body.number);
             continue;
+        }
+        if (full) {
+            struct signal_queue_item evicted;
+
+            if (signal_queue_evict_background(&node.queue, &evicted) != 0) {
+                pthread_mutex_unlock(&node.lock);
+                fprintf(stderr,
+                        "relay %s: queue is full, rejecting signal %" PRIu64 "\n",
+                        node.own_name, buffer.message.body.number);
+                if (reject(node.own_name, rcvid, EAGAIN,
+                           "rejecting a signal because the queue is full failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            pthread_mutex_unlock(&node.lock);
+            if (evicted.body.class_id != SIGNAL_CLASS_BACKGROUND) {
+                fprintf(stderr,
+                        "relay %s: eviction returned signal %" PRIu64
+                        " class %s\n",
+                        node.own_name, evicted.body.number,
+                        signal_class_name(evicted.body.class_id));
+                return EXIT_FAILURE;
+            }
+            note_drop(&node, evicted.body.number);
+        } else {
+            pthread_mutex_unlock(&node.lock);
         }
 
         now_ns = monotonic_ns(node.own_name);
