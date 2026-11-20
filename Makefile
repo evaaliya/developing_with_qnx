@@ -28,8 +28,11 @@ test:
 		tests/test_deadline.c src/common/signal_msg.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-queue \
 		tests/test_queue.c src/common/signal_queue.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-net-state \
+		tests/test_net_state.c src/common/net_state.c
 	./build/test-deadline
 	./build/test-queue
+	./build/test-net-state
 
 clean:
 	rm -rf build
