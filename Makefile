@@ -32,10 +32,13 @@ test:
 		tests/test_net_state.c src/common/net_state.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-restart \
 		tests/test_restart.c src/common/restart_limit.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-ledger \
+		tests/test_ledger.c src/common/signal_ledger.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
 	./build/test-restart
+	./build/test-ledger
 
 clean:
 	rm -rf build
