@@ -74,6 +74,50 @@ int main(void)
     expect_int("number 0 is rejected",
                signal_ledger_issue(&ledger, 0, SIGNAL_CLASS_URGENT), -1);
 
+    signal_ledger_init(&ledger);
+    expect_int("issue a background to drop",
+               signal_ledger_issue(&ledger, 6, SIGNAL_CLASS_BACKGROUND), 0);
+    expect_u("issued background is open", signal_ledger_unaccounted(&ledger), 1);
+    expect_int("drop the issued background", signal_ledger_drop(&ledger, 6), 0);
+    expect_int("the account is dropped",
+               ledger.account[6] == SIGNAL_ACCOUNT_DROPPED, 1);
+    expect_u("a drop is accounted", signal_ledger_unaccounted(&ledger), 0);
+    expect_int("dropping it again fails", signal_ledger_drop(&ledger, 6), -1);
+    expect_int("a second drop stays dropped",
+               ledger.account[6] == SIGNAL_ACCOUNT_DROPPED, 1);
+
+    signal_ledger_init(&ledger);
+    expect_int("issue a background that arrives",
+               signal_ledger_issue(&ledger, 7, SIGNAL_CLASS_BACKGROUND), 0);
+    expect_int("receive before a drop",
+               signal_ledger_receive(&ledger, 7, SIGNAL_CLASS_BACKGROUND,
+                                     SIGNAL_ON_TIME),
+               0);
+    expect_int("an arrival cannot be dropped", signal_ledger_drop(&ledger, 7), -1);
+    expect_int("arrival stays on time after a refused drop",
+               ledger.account[7] == SIGNAL_ACCOUNT_ON_TIME, 1);
+    expect_int("issue a late background",
+               signal_ledger_issue(&ledger, 10, SIGNAL_CLASS_BACKGROUND), 0);
+    expect_int("receive late before a drop",
+               signal_ledger_receive(&ledger, 10, SIGNAL_CLASS_BACKGROUND,
+                                     SIGNAL_LATE),
+               0);
+    expect_int("a late arrival cannot be dropped",
+               signal_ledger_drop(&ledger, 10), -1);
+    expect_int("late arrival stays late",
+               ledger.account[10] == SIGNAL_ACCOUNT_LATE, 1);
+
+    expect_int("an unissued number cannot be dropped",
+               signal_ledger_drop(&ledger, 8), -1);
+    expect_u("refusing an unissued drop adds nothing",
+             signal_ledger_unaccounted(&ledger), 0);
+
+    expect_int("issue an urgent",
+               signal_ledger_issue(&ledger, 9, SIGNAL_CLASS_URGENT), 0);
+    expect_int("an urgent cannot be dropped", signal_ledger_drop(&ledger, 9), -1);
+    expect_int("urgent stays open", ledger.account[9] == SIGNAL_ACCOUNT_NONE, 1);
+    expect_u("urgent is still unaccounted", signal_ledger_unaccounted(&ledger), 1);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

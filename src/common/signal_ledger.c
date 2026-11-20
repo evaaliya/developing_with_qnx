@@ -39,7 +39,8 @@ int signal_ledger_receive(struct signal_ledger *ledger, uint64_t number,
         return -1;
     }
     if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME ||
-        ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
+        ledger->account[number] == SIGNAL_ACCOUNT_LATE ||
+        ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
         return -1;
     }
     next = verdict == SIGNAL_ON_TIME ? SIGNAL_ACCOUNT_ON_TIME
@@ -57,11 +58,27 @@ int signal_ledger_lose(struct signal_ledger *ledger, uint64_t number,
     }
     if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME ||
         ledger->account[number] == SIGNAL_ACCOUNT_LATE ||
-        ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
+        ledger->account[number] == SIGNAL_ACCOUNT_LOST ||
+        ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
         return 0;
     }
     ledger->account[number] = SIGNAL_ACCOUNT_LOST;
     ledger->class_id[number] = class_id;
+    return 0;
+}
+
+int signal_ledger_drop(struct signal_ledger *ledger, uint64_t number)
+{
+    if (ledger == NULL || !in_range(number) || !ledger->issued[number]) {
+        return -1;
+    }
+    if (ledger->class_id[number] != SIGNAL_CLASS_BACKGROUND) {
+        return -1;
+    }
+    if (ledger->account[number] != SIGNAL_ACCOUNT_NONE) {
+        return -1;
+    }
+    ledger->account[number] = SIGNAL_ACCOUNT_DROPPED;
     return 0;
 }
 
