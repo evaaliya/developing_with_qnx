@@ -660,3 +660,37 @@ sink: unaccounted 0
 Signals 11 through 45 are omitted as in the queue 6 section.
 
 The same session's `make run-flood` with the default queue of 8 exited 0 and did not repeat the 00:42 totals. Relay A dropped signal 7 and then 10 through 46, all `class BACKGROUND` (38 lines). Sink: URGENT on time 3, COMMAND on time 3, BACKGROUND received 2, dropped 38, lost 0, `unaccounted 0`. The first forward line still has signal 1 queued, so URGENT 9 evicted BACKGROUND 7. The 00:42 run had already popped signal 1, so nothing in that queue of 8 needed to be evicted. `make run` then printed 9 signals on time and `unaccounted 0`. `make run-kill` and `make run-lock` still printed the SAFE, restart, NORMAL, lost 6–18, LOCKED_SAFE, and missing-manifest lines.
+
+## Baseline latency, current relay
+
+`make measure` from `<project-dir>`. `date` printed `2026-11-21 19:29:11 +0600` before the command and `2026-11-21 19:29:48 +0600` after it. Exit code 0. N is 34: 34 calm logs and 34 flood logs, 68 files, each containing `sink: unaccounted 0`. The host report printed `latency unparsed 0` for each scenario. URGENT n is 102 in both scenarios, so the nearest-rank 99th percentile is printed. BACKGROUND under flood has n 84, so its 99th percentile is `n/a`.
+
+This is not a threshold and the 1 second signal deadline was not changed. The relay code was not changed. The CPU 0 pin (D-036) is a condition of these numbers.
+
+Conditions, read in this session, not from an earlier note:
+
+- Guest, from `uname -a` on the same ssh port before the runs, and again from `make run-kill`: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`. `pidin info` showed two processors.
+- The running QEMU process was `qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -accel tcg -m 1G`.
+- Mac model from `sysctl -n hw.model`: `MacBookAir10,1`.
+- Calm is the `make run` configuration: 3 URGENT, 3 COMMAND, 3 BACKGROUND, relay A queue left at its default. Flood is the `make run-flood` configuration: 3, 3, and 40, relay A queue 8.
+
+`sink` prints three hop segments. The second is A→B. The relay stamps a signal when it receives it, so time spent in relay A's queue is inside A→B. The first segment is issue to relay A. The third is relay B to sink. The table below is the full latency and A→B. URGENT's other two segments are in the paragraph under the table, because that is what the priority hypothesis talks about.
+
+| Class | Scenario | n | total median ns | total p99 ns | total max ns | A→B median ns | A→B p99 ns | A→B max ns |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| URGENT | calm | 102 | 3527008 | 54946000 | 55128992 | 2373504 | 6058000 | 8658000 |
+| URGENT | flood | 102 | 16741496 | 21396000 | 21518000 | 15600008 | 20699008 | 20945008 |
+| COMMAND | calm | 102 | 5919000 | 56667008 | 56878992 | 4872000 | 12032992 | 14420000 |
+| COMMAND | flood | 102 | 19187008 | 24148000 | 24712000 | 18187000 | 23146000 | 23372000 |
+| BACKGROUND | calm | 102 | 7646496 | 58452992 | 58687008 | 6597000 | 16296000 | 16522992 |
+| BACKGROUND | flood | 84 | 20860496 | n/a | 25476000 | 20198504 | n/a | 24568000 |
+
+URGENT hop 1 (issue to relay A), median / p99 / max: calm 48992 / 120000 / 122000 ns; flood 60000 / 461008 / 463008 ns. URGENT hop 3 (relay B to sink): calm 977504 / 53856000 / 54012992 ns; flood 859000 / 1464992 / 1482000 ns.
+
+The median move matches a wait in relay A's queue. Flood's URGENT total median is 13214488 ns above calm's. Flood's A→B median is 13226504 ns above calm's. Those two gaps differ by 12016 ns. Hop 1's median stays near 50 µs, and hop 3's median is lower under flood, not higher. Every one of the 102 flood URGENT A→B samples is at least 10 ms. None of the 102 calm URGENT A→B samples is.
+
+The maximum does not match "flood is when URGENT waits the longest." Calm's URGENT total maximum, 55128992 ns, is above flood's maximum, 21518000 ns. The calm 99th percentile, 54946000 ns, is likewise above flood's 21396000 ns. Three calm URGENT signals sit on that tail, and the time is hop 3, not A→B: hops 42000 + 857008 + 54012992 (total 54912000), hops 44992 + 1228000 + 53856000 (total 55128992), and hops 44000 + 1660000 + 53242000 (total 54946000). Flood has no URGENT hop 3 at or above 2 ms. Flood's own maximum is on A→B (20945008 ns), and it is still below those three calm totals.
+
+Every hop and total printed in the 68 logs, 2376 numbers, ends in 000, 008, or 992. No other residue modulo 1000 appears. The unit on the line is nanoseconds. The values are coarser than 1 ns. That limit is F-022. The table keeps the printed integers.
+
+Separate from `make measure`, this session ran `make run` and `make run-flood` once each. Both exited 0 with `sink: unaccounted 0`. `make run` printed 9 signals on time, signal 1 `on time, held`, and no dropped line. `make run-flood` dropped 37 signals, all `class BACKGROUND`, and sink printed URGENT on time 3, COMMAND on time 3, BACKGROUND received 3, dropped 37. That is the other drop count already seen for queue 8, not a new shape. `make run-kill` exited 0 and printed `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, and `sink: unaccounted 0`. `make run-lock` exited 0, restarted relay B once, printed `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, did not start relay B a third time, and sink printed that the manifest did not arrive.
