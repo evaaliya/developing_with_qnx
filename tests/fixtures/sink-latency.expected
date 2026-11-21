@@ -1,0 +1,16 @@
+latency class URGENT n 3
+latency class URGENT total n 3 median 40 ns p99 n/a max 45 ns
+latency class URGENT hop 1 n 3 median 15 ns p99 n/a max 20 ns
+latency class URGENT hop 2 n 3 median 20 ns p99 n/a max 30 ns
+latency class URGENT hop 3 n 3 median 5 ns p99 n/a max 5 ns
+latency class COMMAND n 1
+latency class COMMAND total n 1 median 102 ns p99 n/a max 102 ns
+latency class COMMAND hop 1 n 1 median 100 ns p99 n/a max 100 ns
+latency class COMMAND hop 2 n 1 median 1 ns p99 n/a max 1 ns
+latency class COMMAND hop 3 n 1 median 1 ns p99 n/a max 1 ns
+latency class BACKGROUND n 1
+latency class BACKGROUND total n 1 median 24 ns p99 n/a max 24 ns
+latency class BACKGROUND hop 1 n 1 median 7 ns p99 n/a max 7 ns
+latency class BACKGROUND hop 2 n 1 median 8 ns p99 n/a max 8 ns
+latency class BACKGROUND hop 3 n 1 median 9 ns p99 n/a max 9 ns
+latency unparsed 1

@@ -1,0 +1,5 @@
+sink: signal 5 class URGENT on time, fresh, hops 15 ns, 20 ns, 5 ns, total 40 ns
+sink: signal 3 class COMMAND on time, held, hops 100 ns, 1 ns, 1 ns, total 102 ns
+sink: signal 4 class BACKGROUND on time, hops 7 ns, 8 ns, 9 ns, total 24 ns
+noise from the relay log
+sink: unaccounted 0

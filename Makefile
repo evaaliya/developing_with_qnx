@@ -12,6 +12,12 @@ SCP := scp -P 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 
 .PHONY: default all clean upload run test run-kill run-lock run-flood
 
+build/latency-report: src/latency-report/latency_report.c \
+		src/common/latency_stats.c src/common/latency_stats.h
+	mkdir -p build
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o $@ \
+		src/latency-report/latency_report.c src/common/latency_stats.c
+
 CHAIN_URGENT := 3
 CHAIN_COMMAND := 3
 CHAIN_BACKGROUND := 3
@@ -26,7 +32,7 @@ default:
 
 all: default
 
-test:
+test: build/latency-report
 	mkdir -p build
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-deadline \
 		tests/test_deadline.c src/common/signal_msg.c
@@ -46,6 +52,9 @@ test:
 	./build/test-restart
 	./build/test-ledger
 	./build/test-latency-stats
+	./build/latency-report tests/fixtures/sink-latency-a.txt \
+		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
+	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out
 
 clean:
 	rm -rf build

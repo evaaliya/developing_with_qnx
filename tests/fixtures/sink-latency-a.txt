@@ -1,0 +1,5 @@
+sink: state NORMAL
+sink: signal 1 class URGENT on time, fresh, hops 10 ns, 30 ns, 5 ns, total 45 ns
+sink: signal 2 class URGENT late, hops 20 ns, 10 ns, 5 ns, total 35 ns
+sink: signal nope this line does not parse
+sink: summary URGENT received 2, on time 1, late 1, lost 0, dropped 0
