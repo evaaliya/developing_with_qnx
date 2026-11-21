@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test run-kill run-lock run-flood measure
+.PHONY: default all clean upload run test run-kill run-lock run-flood measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -29,6 +29,8 @@ FLOOD_QUEUE := 8
 # has at least 100 samples (D-045). A non-zero guest status or a log
 # without "sink: unaccounted 0" stops the target. That run is kept.
 MEASURE_N ?= 34
+# Calm runs with the sink free, then the same number pinned to CPU 0 (D-049).
+STALL_K ?= 20
 
 default:
 	mkdir -p build
@@ -103,7 +105,7 @@ measure: upload build/latency-report
 	while [ "$$i" -le "$$n" ]; do \
 	  log=$$(printf 'build/measure/calm-%02d.log' "$$i"); \
 	  set +e; \
-	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND)' > "$$log"; \
+	  $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) $$i" > "$$log"; \
 	  status=$$?; \
 	  set -e; \
 	  if [ "$$status" -ne 0 ]; then \
@@ -120,7 +122,7 @@ measure: upload build/latency-report
 	while [ "$$i" -le "$$n" ]; do \
 	  log=$$(printf 'build/measure/flood-%02d.log' "$$i"); \
 	  set +e; \
-	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE)' > "$$log"; \
+	  $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE) $$i" > "$$log"; \
 	  status=$$?; \
 	  set -e; \
 	  if [ "$$status" -ne 0 ]; then \
@@ -138,3 +140,50 @@ measure: upload build/latency-report
 	./build/latency-report build/measure/calm-*.log; \
 	echo "=== flood ==="; \
 	./build/latency-report build/measure/flood-*.log
+
+stall-check: upload build/latency-report
+	mkdir -p build/stall
+	rm -f build/stall/free-*.log build/stall/pinned-*.log
+	case '$(STALL_K)' in \
+	  ''|*[!0-9]*|0) echo "stall-check: STALL_K must be a positive integer" >&2; exit 2 ;; \
+	esac
+	k='$(STALL_K)'; \
+	i=1; \
+	while [ "$$i" -le "$$k" ]; do \
+	  log=$$(printf 'build/stall/free-%02d.log' "$$i"); \
+	  set +e; \
+	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND)' > "$$log"; \
+	  status=$$?; \
+	  set -e; \
+	  if [ "$$status" -ne 0 ]; then \
+	    echo "stall-check: free $$i exited $$status" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	  if ! grep -q 'sink: unaccounted 0' "$$log"; then \
+	    echo "stall-check: free $$i has no unaccounted 0" >&2; \
+	    exit 1; \
+	  fi; \
+	  i=$$((i + 1)); \
+	done; \
+	i=1; \
+	while [ "$$i" -le "$$k" ]; do \
+	  log=$$(printf 'build/stall/pinned-%02d.log' "$$i"); \
+	  set +e; \
+	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) pin' > "$$log"; \
+	  status=$$?; \
+	  set -e; \
+	  if [ "$$status" -ne 0 ]; then \
+	    echo "stall-check: pinned $$i exited $$status" >&2; \
+	    exit "$$status"; \
+	  fi; \
+	  if ! grep -q 'sink: unaccounted 0' "$$log"; then \
+	    echo "stall-check: pinned $$i has no unaccounted 0" >&2; \
+	    exit 1; \
+	  fi; \
+	  i=$$((i + 1)); \
+	done; \
+	set -e; \
+	echo "=== free ==="; \
+	./build/latency-report --stalls build/stall/free-*.log; \
+	echo "=== pinned ==="; \
+	./build/latency-report --stalls build/stall/pinned-*.log

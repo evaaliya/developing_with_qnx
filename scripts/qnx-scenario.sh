@@ -15,6 +15,8 @@ run_chain() {
     command=$3
     background=$4
     queue=${5:-}
+    seed=${6:-}
+    pin=${7:-}
     total=$((urgent + command + background))
     sink_pid=
     relay_a=
@@ -22,7 +24,11 @@ run_chain() {
     source_status=0
     sink_status=0
 
-    /tmp/sink "$total" > /tmp/sink.out 2>&1 &
+    if [ "$pin" = "pin" ]; then
+        /tmp/sink -c 0 "$total" > /tmp/sink.out 2>&1 &
+    else
+        /tmp/sink "$total" > /tmp/sink.out 2>&1 &
+    fi
     sink_pid=$!
     /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
     relay_b=$!
@@ -34,7 +40,11 @@ run_chain() {
     relay_a=$!
 
     set +e
-    /tmp/source "$urgent" "$command" "$background" signal-relay-a > /tmp/source.out 2>&1
+    if [ -n "$seed" ]; then
+        /tmp/source -s "$seed" "$urgent" "$command" "$background" signal-relay-a > /tmp/source.out 2>&1
+    else
+        /tmp/source "$urgent" "$command" "$background" signal-relay-a > /tmp/source.out 2>&1
+    fi
     source_status=$?
     sink_status=0
     wait "$sink_pid" || sink_status=$?
@@ -62,18 +72,31 @@ run_chain() {
 mode=${1:-}
 case "$mode" in
 calm)
-    if [ "$#" -ne 4 ]; then
-        echo "usage: qnx-scenario.sh calm URGENT COMMAND BACKGROUND" >&2
+    seed=
+    pin=
+    if [ "$#" -eq 4 ]; then
+        :
+    elif [ "$#" -eq 5 ] && [ "$5" = "pin" ]; then
+        pin=pin
+    elif [ "$#" -eq 5 ]; then
+        seed=$5
+    else
+        echo "usage: qnx-scenario.sh calm URGENT COMMAND BACKGROUND [SEED|pin]" >&2
         exit 2
     fi
-    run_chain calm "$2" "$3" "$4"
+    run_chain calm "$2" "$3" "$4" "" "$seed" "$pin"
     ;;
 flood)
-    if [ "$#" -ne 5 ]; then
-        echo "usage: qnx-scenario.sh flood URGENT COMMAND BACKGROUND QUEUE" >&2
+    seed=
+    if [ "$#" -eq 5 ]; then
+        :
+    elif [ "$#" -eq 6 ]; then
+        seed=$6
+    else
+        echo "usage: qnx-scenario.sh flood URGENT COMMAND BACKGROUND QUEUE [SEED]" >&2
         exit 2
     fi
-    run_chain flood "$2" "$3" "$4" "$5"
+    run_chain flood "$2" "$3" "$4" "$5" "$seed" ""
     ;;
 kill) k=3 ;;
 lock) k=2 ;;
