@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "issue_order.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
@@ -222,26 +223,40 @@ int main(int argc, char **argv)
     unsigned long command;
     unsigned long background;
     unsigned long gap_ms = 0;
-    unsigned long left_u;
-    unsigned long left_c;
-    unsigned long left_b;
     unsigned long total;
     unsigned long recorded = 0;
     uint64_t number;
     int coid;
     int ceiling;
+    int arg0 = 1;
+    int have_seed = 0;
+    uint32_t seed = 0;
+    uint32_t plan[SIGNAL_QUEUE_CAP];
+    uint32_t planned = 0;
+    uint32_t step;
     struct signal_manifest manifest;
     long sent;
 
-    if ((argc != 5 && argc != 6) ||
-        parse_count(argv[1], &urgent) != 0 ||
-        parse_count(argv[2], &command) != 0 ||
-        parse_count(argv[3], &background) != 0 ||
-        argv[4][0] == '\0' ||
-        (argc == 6 && parse_count(argv[5], &gap_ms) != 0)) {
-        fprintf(stderr,
-                "usage: source <urgent-count> <command-count> "
-                "<background-count> <next-name> [gap-ms]\n");
+    if (argc >= 3 && strcmp(argv[1], "-s") == 0) {
+        unsigned long seed_value;
+
+        if (parse_count(argv[2], &seed_value) != 0 || seed_value > UINT32_MAX) {
+            fprintf(stderr, "usage: source [-s seed] <urgent-count> "
+                    "<command-count> <background-count> <next-name> [gap-ms]\n");
+            return EXIT_FAILURE;
+        }
+        have_seed = 1;
+        seed = (uint32_t)seed_value;
+        arg0 = 3;
+    }
+    if ((argc - arg0 != 4 && argc - arg0 != 5) ||
+        parse_count(argv[arg0], &urgent) != 0 ||
+        parse_count(argv[arg0 + 1], &command) != 0 ||
+        parse_count(argv[arg0 + 2], &background) != 0 ||
+        argv[arg0 + 3][0] == '\0' ||
+        (argc - arg0 == 5 && parse_count(argv[arg0 + 4], &gap_ms) != 0)) {
+        fprintf(stderr, "usage: source [-s seed] <urgent-count> "
+                "<command-count> <background-count> <next-name> [gap-ms]\n");
         return EXIT_FAILURE;
     }
 
@@ -274,44 +289,30 @@ int main(int argc, char **argv)
     }
     printf("source: SCHED_FIFO ceiling %d, sending %lu URGENT, %lu COMMAND, "
            "%lu BACKGROUND to %s\n",
-           ceiling, urgent, command, background, argv[4]);
+           ceiling, urgent, command, background, argv[arg0 + 3]);
     fflush(stdout);
 
-    coid = open_next(argv[4]);
+    coid = open_next(argv[arg0 + 3]);
     if (coid == -1) {
         return EXIT_FAILURE;
     }
 
     memset(&manifest, 0, sizeof manifest);
     manifest.type = SIGNAL_MSG_MANIFEST;
-    left_u = urgent;
-    left_c = command;
-    left_b = background;
+    if (issue_order_burst(have_seed, seed, (uint32_t)urgent, (uint32_t)command,
+                          (uint32_t)background, plan, SIGNAL_QUEUE_CAP,
+                          &planned) != 0 ||
+        planned != total) {
+        fprintf(stderr, "source: could not lay out the burst\n");
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
     number = 1;
-    while (left_b > 0 || left_c > 0 || left_u > 0) {
-        if (left_b > 0) {
-            if (send_recorded(coid, &manifest, &recorded, &number,
-                              SIGNAL_CLASS_BACKGROUND, gap_ms) != 0) {
-                name_close(coid);
-                return EXIT_FAILURE;
-            }
-            left_b--;
-        }
-        if (left_c > 0) {
-            if (send_recorded(coid, &manifest, &recorded, &number,
-                              SIGNAL_CLASS_COMMAND, gap_ms) != 0) {
-                name_close(coid);
-                return EXIT_FAILURE;
-            }
-            left_c--;
-        }
-        if (left_u > 0) {
-            if (send_recorded(coid, &manifest, &recorded, &number,
-                              SIGNAL_CLASS_URGENT, gap_ms) != 0) {
-                name_close(coid);
-                return EXIT_FAILURE;
-            }
-            left_u--;
+    for (step = 0; step < planned; step++) {
+        if (send_recorded(coid, &manifest, &recorded, &number, plan[step],
+                          gap_ms) != 0) {
+            name_close(coid);
+            return EXIT_FAILURE;
         }
     }
 
@@ -347,7 +348,7 @@ int main(int argc, char **argv)
 
     if (name_close(coid) == -1) {
         fprintf(stderr, "source: closing the connection to %s failed: %s\n",
-                argv[4], strerror(errno));
+                argv[arg0 + 3], strerror(errno));
         return EXIT_FAILURE;
     }
 
