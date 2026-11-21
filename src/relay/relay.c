@@ -923,18 +923,21 @@ int main(int argc, char **argv)
         stamped.hop_ns[stamped.hop_count] = now_ns;
         stamped.hop_count++;
 
-        /* Reply before the forward thread can see the signal (D-031, D-035). */
+        /* Reply first, so the forward thread cannot preempt this receive
+         * before the sender is released (D-031, D-035). Queue the signal
+         * before dropping to the node priority (D-050).
+         */
         if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
             fprintf(stderr, "relay %s: replying to the sender failed: %s\n",
                     node.own_name, strerror(errno));
             return EXIT_FAILURE;
         }
-        if (set_fifo(node.own_name, node.own_priority) != 0) {
-            return EXIT_FAILURE;
-        }
         {
             int queued = enqueue(&node, &stamped, now_ns);
 
+            if (set_fifo(node.own_name, node.own_priority) != 0) {
+                return EXIT_FAILURE;
+            }
             if (queued > 0) {
                 write_lost(&node, &stamped);
                 continue;
