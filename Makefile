@@ -66,62 +66,10 @@ upload: default
 	$(SCP) ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
 
 run: upload
-	$(SSH) root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
-	  total=$$(($(CHAIN_URGENT) + $(CHAIN_COMMAND) + $(CHAIN_BACKGROUND))); \
-	  /tmp/sink $$total > /tmp/sink.out 2>&1 & \
-	  sink_pid=$$!; \
-	  /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 & \
-	  relay_b=$$!; \
-	  /tmp/relay signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 & \
-	  relay_a=$$!; \
-	  /tmp/source $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) signal-relay-a > /tmp/source.out 2>&1; \
-	  source_status=$$?; \
-	  sink_status=0; \
-	  wait $$sink_pid || sink_status=$$?; \
-	  slay -Q -f relay >/dev/null 2>&1 || true; \
-	  slay -Q -f source >/dev/null 2>&1 || true; \
-	  slay -Q -f sink >/dev/null 2>&1 || true; \
-	  wait $$relay_a >/dev/null 2>&1 || true; \
-	  wait $$relay_b >/dev/null 2>&1 || true; \
-	  echo "--- source (exit $$source_status) ---"; \
-	  cat /tmp/source.out; \
-	  echo "--- relay A ---"; \
-	  cat /tmp/relay-a.out; \
-	  echo "--- relay B ---"; \
-	  cat /tmp/relay-b.out; \
-	  echo "--- sink (exit $$sink_status) ---"; \
-	  cat /tmp/sink.out; \
-	  if [ "$$source_status" -ne 0 ]; then exit "$$source_status"; fi; \
-	  exit "$$sink_status"'
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND)'
 
 run-flood: upload
-	$(SSH) root@localhost 'chmod +x /tmp/source /tmp/sink /tmp/relay; \
-	  total=$$(($(FLOOD_URGENT) + $(FLOOD_COMMAND) + $(FLOOD_BACKGROUND))); \
-	  /tmp/sink $$total > /tmp/sink.out 2>&1 & \
-	  sink_pid=$$!; \
-	  /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 & \
-	  relay_b=$$!; \
-	  /tmp/relay signal-relay-a signal-relay-b -q $(FLOOD_QUEUE) > /tmp/relay-a.out 2>&1 & \
-	  relay_a=$$!; \
-	  /tmp/source $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) signal-relay-a > /tmp/source.out 2>&1; \
-	  source_status=$$?; \
-	  sink_status=0; \
-	  wait $$sink_pid || sink_status=$$?; \
-	  slay -Q -f relay >/dev/null 2>&1 || true; \
-	  slay -Q -f source >/dev/null 2>&1 || true; \
-	  slay -Q -f sink >/dev/null 2>&1 || true; \
-	  wait $$relay_a >/dev/null 2>&1 || true; \
-	  wait $$relay_b >/dev/null 2>&1 || true; \
-	  echo "--- source (exit $$source_status) ---"; \
-	  cat /tmp/source.out; \
-	  echo "--- relay A ---"; \
-	  cat /tmp/relay-a.out; \
-	  echo "--- relay B ---"; \
-	  cat /tmp/relay-b.out; \
-	  echo "--- sink (exit $$sink_status) ---"; \
-	  cat /tmp/sink.out; \
-	  if [ "$$source_status" -ne 0 ]; then exit "$$source_status"; fi; \
-	  exit "$$sink_status"'
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE)'
 
 run-kill: upload
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh kill'
