@@ -4,7 +4,8 @@
 /*
  * Every issued signal ends as on time, late, lost, or dropped.
  * No QNX headers. Numbers are 1..SIGNAL_LEDGER_CAP.
- * A drop is only an issued BACKGROUND that has not arrived yet.
+ * A drop is an issued BACKGROUND or COMMAND that has not arrived yet.
+ * URGENT is never dropped.
  */
 
 #include "signal_msg.h"
@@ -47,10 +48,11 @@ int signal_ledger_lose(struct signal_ledger *ledger, uint64_t number,
                        uint32_t class_id);
 
 /*
- * 0 when an issued, not-yet-arrived BACKGROUND is now dropped.
- * -1 if ledger is NULL, the number is out of range, the number was
- * not issued, the class is not BACKGROUND, or it already arrived,
- * was lost, or was dropped. The account is unchanged on -1.
+ * 0 when an issued, not-yet-arrived BACKGROUND or COMMAND is now
+ * dropped. -1 if ledger is NULL, the number is out of range, the
+ * number was not issued, the class is not BACKGROUND or COMMAND, or
+ * it already arrived, was lost, or was dropped. URGENT is refused.
+ * The account is unchanged on -1.
  */
 int signal_ledger_drop(struct signal_ledger *ledger, uint64_t number);
 

@@ -72,7 +72,8 @@ int signal_ledger_drop(struct signal_ledger *ledger, uint64_t number)
     if (ledger == NULL || !in_range(number) || !ledger->issued[number]) {
         return -1;
     }
-    if (ledger->class_id[number] != SIGNAL_CLASS_BACKGROUND) {
+    if (ledger->class_id[number] != SIGNAL_CLASS_BACKGROUND &&
+        ledger->class_id[number] != SIGNAL_CLASS_COMMAND) {
         return -1;
     }
     if (ledger->account[number] != SIGNAL_ACCOUNT_NONE) {

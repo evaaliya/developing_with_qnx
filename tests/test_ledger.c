@@ -118,6 +118,30 @@ int main(void)
     expect_int("urgent stays open", ledger.account[9] == SIGNAL_ACCOUNT_NONE, 1);
     expect_u("urgent is still unaccounted", signal_ledger_unaccounted(&ledger), 1);
 
+    signal_ledger_init(&ledger);
+    expect_int("issue a command to drop",
+               signal_ledger_issue(&ledger, 11, SIGNAL_CLASS_COMMAND), 0);
+    expect_u("issued command is open", signal_ledger_unaccounted(&ledger), 1);
+    expect_int("drop the issued command", signal_ledger_drop(&ledger, 11), 0);
+    expect_int("the command account is dropped",
+               ledger.account[11] == SIGNAL_ACCOUNT_DROPPED, 1);
+    expect_u("a dropped command is accounted",
+             signal_ledger_unaccounted(&ledger), 0);
+    expect_int("dropping the command again fails",
+               signal_ledger_drop(&ledger, 11), -1);
+
+    signal_ledger_init(&ledger);
+    expect_int("issue a command that arrives",
+               signal_ledger_issue(&ledger, 12, SIGNAL_CLASS_COMMAND), 0);
+    expect_int("receive the command before a drop",
+               signal_ledger_receive(&ledger, 12, SIGNAL_CLASS_COMMAND,
+                                     SIGNAL_ON_TIME),
+               0);
+    expect_int("an arrived command cannot be dropped",
+               signal_ledger_drop(&ledger, 12), -1);
+    expect_int("arrived command stays on time",
+               ledger.account[12] == SIGNAL_ACCOUNT_ON_TIME, 1);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;
