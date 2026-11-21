@@ -344,6 +344,9 @@ static void *forward_main(void *arg)
         rcvid_t manifest_rcvid = 0;
         int priority;
         long sent;
+        int64_t arrived_ns = 0;
+        int64_t start_ns = 0;
+        int64_t end_ns = 0;
 
         pthread_mutex_lock(&node->lock);
         while (signal_queue_count(&node->queue) == 0 && !node->manifest_waiting &&
@@ -428,7 +431,19 @@ static void *forward_main(void *arg)
         message.type = SIGNAL_MSG_TYPE;
         message.body = item.body;
         memset(&reply, 0, sizeof reply);
+        /*
+         * arrived is this node's own hop stamp (D-048). start is the
+         * clock immediately before MsgSend, end immediately after.
+         */
+        if (item.body.hop_count >= 1 &&
+            item.body.hop_count <= SIGNAL_MAX_HOPS) {
+            arrived_ns = item.body.hop_ns[item.body.hop_count - 1];
+        } else {
+            arrived_ns = 0;
+        }
+        start_ns = monotonic_ns(node->own_name);
         sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
+        end_ns = monotonic_ns(node->own_name);
         pthread_mutex_lock(&node->lock);
         settle_forward_locked(node);
         pthread_mutex_unlock(&node->lock);
@@ -446,10 +461,13 @@ static void *forward_main(void *arg)
             exit(EXIT_FAILURE);
         }
 
-        printf("relay %s: sent signal %" PRIu64 " class %s; still waiting: %s\n",
+        printf("relay %s: sent signal %" PRIu64
+               " class %s; still waiting: %s arrived %" PRId64
+               " start %" PRId64 " end %" PRId64 "\n",
                node->own_name, item.body.number,
                signal_class_name(item.body.class_id),
-               waiting[0] == '\0' ? "none" : waiting);
+               waiting[0] == '\0' ? "none" : waiting,
+               arrived_ns, start_ns, end_ns);
         fflush(stdout);
     }
     return NULL;
