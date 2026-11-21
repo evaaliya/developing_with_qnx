@@ -818,3 +818,36 @@ stall runs 0
 Those two medians match the sink lines: free-01 hop 3 from 52943008 ns to 58604000 ns, median 56589008 ns; free-04 hop 3 from 46762000 ns to 52669008 ns, median 49935008 ns. The rule fired. Sink now pins its thread to CPU 0 with `ThreadCtl`. `-c 0` is still accepted and is the same pin. The follow-up measure in the previous section is that default. One later shuffled calm log, `calm-31`, still has a hop-3 median above 20 ms, so the pin removed the stalls inside this 20-and-20 experiment and did not remove every later stall.
 
 After that pin was the default, regression on the guest exited 0. `make run` at 22:50:07 +06: source order background, command, urgent; 9 signals on time; dropped 0; lost 0; `unaccounted 0`. `make run-flood`: source exit 0; the same fixed order; dropped signals 28, 31, 36, 39, 42, and 45, all `class BACKGROUND`; URGENT on time 3; COMMAND on time 3; BACKGROUND received 34, dropped 6; `unaccounted 0`. `make run-kill`: `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, `unaccounted 0`. `make run-lock`: one `supervisor: restarted relay-b`, then `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, no third start, and sink printed that the manifest did not arrive.
+
+## Receive thread queues a signal before it drops priority
+
+The receive thread on an accepted signal now replies, enqueues, then sets its own priority. The reply is still first. The priority drop is what moved. Class priorities, the forward-thread boost, the hop stamp, the relay line format, and the sink CPU 0 pin are unchanged.
+
+`make measure` from `<project-dir>`, N=34, seed equal to the run number. `date` printed `2026-11-22 00:11:17 +0600` before the guest loops and `2026-11-22 00:11:56 +0600` after the report. Exit code 0. 34 calm logs and 34 flood logs. Each log contains `sink: unaccounted 0`. The host report printed `latency unparsed 0` and `relay unparsed 0` for each scenario. URGENT n is 102 in both scenarios. Guest, from `uname -a` on the same ssh port before this run: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`. Source, both relays, and sink stay pinned to CPU 0. This is QEMU TCG, not hardware. The comparison column is the pinned-sink measure from the previous section (calm 68/77, flood 64/106, sum 315).
+
+R5 violations, relay A / relay B. The report printed every B13 line. All 38 remaining lines are relay B. Relay A is 0 in both scenarios.
+
+| Scenario | B12 A | B12 B | B13 A | B13 B |
+| --- | ---: | ---: | ---: | ---: |
+| calm | 68 | 77 | 0 | 17 |
+| flood | 64 | 106 | 0 | 21 |
+| sum | 132 | 183 | 0 | 38 |
+
+The B12 sum is 315. The B13 sum is 38. The line fixed before the run was 31, which is 10% of 315. 38 is above that line, so the R5 criterion is unmet. The criterion was not changed.
+
+Full-latency medians, nanoseconds, from the same two reports:
+
+| Class | Scenario | B12 pinned | B13 |
+| --- | --- | ---: | ---: |
+| URGENT | calm | 2526504 | 1105496 |
+| URGENT | flood | 3065504 | 1085000 |
+| COMMAND | calm | 3543992 | 2195496 |
+| COMMAND | flood | 3376000 | 2096008 |
+| BACKGROUND | calm | 5182496 | 5812504 |
+| BACKGROUND | flood | 8024000 | 6098000 |
+
+Under flood the B13 medians go 1085000, then 2096008, then 6098000. That is URGENT, then COMMAND, then BACKGROUND. The flood URGENT median 1085000 is below twice the calm URGENT median from this same session, 2 × 1105496 = 2210992. Across the 34 flood logs the relay drop lines are 274 BACKGROUND and 0 URGENT or COMMAND. Calm drop lines are 0.
+
+One calm line from the report, so the shape is visible: `relay signal-relay-b R5 violation build/measure/calm-22.log signal 1 class COMMAND start 267507464096000; signal 2 class URGENT arrived 267507464020000 start 267507465138000`. There the urgent arrival is 76000 ns before the command start.
+
+Separate from the measure, the same binary was run through `make run`, `make run-flood`, `make run-kill`, and `make run-lock` from 00:13:03 to 00:13:35 +06. Each exited 0. `make run`: source exit 0, order background, command, urgent, 9 signals on time, dropped 0, lost 0, `unaccounted 0`. `make run-flood`: source exit 0, the same order, dropped signals 40 and 43, both `class BACKGROUND`, URGENT on time 3, COMMAND on time 3, BACKGROUND received 38, dropped 2, `unaccounted 0`. `make run-kill`: `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, `unaccounted 0`. `make run-lock`: one `supervisor: restarted relay-b`, then `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, no third start, and sink printed that the manifest did not arrive.
