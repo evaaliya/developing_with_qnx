@@ -5,7 +5,8 @@
  * Bounded queue of signals. No QNX headers and no clock: the caller
  * passes the arrival time and the arrival order. Not thread-safe.
  * Ordering and a full push that changes nothing are D-034.
- * Evicting the newest BACKGROUND is D-042. Push itself never evicts.
+ * Evicting the newest item of one class is D-042 and D-044.
+ * URGENT is never evicted. Push itself never evicts.
  */
 
 #include "signal_msg.h"
@@ -40,11 +41,16 @@ int signal_queue_push(struct signal_queue *q, const struct signal *sig,
 int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out);
 
 /*
- * Removes the newest BACKGROUND: larger arrival_ns, then larger
- * arrival_order. URGENT and COMMAND stay. 0 on success. -1 if q or
- * out is NULL, the queue is empty, or it holds no BACKGROUND.
+ * Removes the newest item of class_id: larger arrival_ns, then larger
+ * arrival_order. SIGNAL_CLASS_URGENT always returns -1.
+ * 0 on success. -1 if q or out is NULL, the queue is empty, class_id
+ * is URGENT, or the queue holds none of that class.
  * On -1 the queue and out are unchanged.
  */
+int signal_queue_evict_newest(struct signal_queue *q, uint32_t class_id,
+                              struct signal_queue_item *out);
+
+/* Newest BACKGROUND. Thin wrapper around signal_queue_evict_newest. */
 int signal_queue_evict_background(struct signal_queue *q,
                                   struct signal_queue_item *out);
 

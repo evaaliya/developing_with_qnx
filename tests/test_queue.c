@@ -204,6 +204,62 @@ int main(void)
     expect_int("null evict queue", signal_queue_evict_background(NULL, &item), -1);
     expect_int("null evict output", signal_queue_evict_background(&q, NULL), -1);
 
+    signal_queue_init(&q);
+    expect_int("command evict later",
+               push(&q, 1, SIGNAL_CLASS_COMMAND, 100, 1), 0);
+    expect_int("command evict earlier",
+               push(&q, 2, SIGNAL_CLASS_COMMAND, 40, 2), 0);
+    expect_int("command evict urgent stays put",
+               push(&q, 3, SIGNAL_CLASS_URGENT, 10, 3), 0);
+    expect_int("command evict background stays put",
+               push(&q, 4, SIGNAL_CLASS_BACKGROUND, 500, 4), 0);
+    memset(&item, 0, sizeof item);
+    expect_int("evict the newest command",
+               signal_queue_evict_newest(&q, SIGNAL_CLASS_COMMAND, &item), 0);
+    expect_u64("newest command is signal 1", item.body.number, 1);
+    expect_int("three remain after a command eviction",
+               (int)signal_queue_count(&q), 3);
+    expect_int("earlier command stayed", contains_number(&q, 2), 1);
+    expect_int("urgent stayed after a command eviction", contains_number(&q, 3), 1);
+    expect_int("background stayed after a command eviction",
+               contains_number(&q, 4), 1);
+    expect_int("evicted command is gone", contains_number(&q, 1), 0);
+
+    signal_queue_init(&q);
+    expect_int("urgent cannot be evicted, setup",
+               push(&q, 11, SIGNAL_CLASS_URGENT, 10, 1), 0);
+    expect_int("urgent cannot be evicted, later urgent",
+               push(&q, 12, SIGNAL_CLASS_URGENT, 90, 2), 0);
+    expect_int("urgent cannot be evicted, command",
+               push(&q, 13, SIGNAL_CLASS_COMMAND, 20, 3), 0);
+    item.body.number = 44;
+    expect_int("an urgent cannot be evicted",
+               signal_queue_evict_newest(&q, SIGNAL_CLASS_URGENT, &item), -1);
+    expect_u64("refusing to evict urgent leaves the output alone",
+               item.body.number, 44);
+    expect_int("refusing to evict urgent leaves the count",
+               (int)signal_queue_count(&q), 3);
+    expect_int("first urgent stayed", contains_number(&q, 11), 1);
+    expect_int("later urgent stayed", contains_number(&q, 12), 1);
+    expect_int("command stayed beside the urgents", contains_number(&q, 13), 1);
+
+    signal_queue_init(&q);
+    expect_int("only urgent 1", push(&q, 21, SIGNAL_CLASS_URGENT, 1, 1), 0);
+    expect_int("only urgent 2", push(&q, 22, SIGNAL_CLASS_URGENT, 2, 2), 0);
+    expect_int("only urgent 3", push(&q, 23, SIGNAL_CLASS_URGENT, 3, 3), 0);
+    item.body.number = 33;
+    expect_int("a queue of only urgents cannot evict urgent",
+               signal_queue_evict_newest(&q, SIGNAL_CLASS_URGENT, &item), -1);
+    expect_int("a queue of only urgents has no command to evict",
+               signal_queue_evict_newest(&q, SIGNAL_CLASS_COMMAND, &item), -1);
+    expect_u64("an all-urgent refusal leaves the output alone",
+               item.body.number, 33);
+    expect_int("an all-urgent queue keeps its count",
+               (int)signal_queue_count(&q), 3);
+    expect_int("all-urgent signal 21 stayed", contains_number(&q, 21), 1);
+    expect_int("all-urgent signal 22 stayed", contains_number(&q, 22), 1);
+    expect_int("all-urgent signal 23 stayed", contains_number(&q, 23), 1);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

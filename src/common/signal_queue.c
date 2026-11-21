@@ -99,19 +99,22 @@ int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
     return 0;
 }
 
-int signal_queue_evict_background(struct signal_queue *q,
-                                  struct signal_queue_item *out)
+int signal_queue_evict_newest(struct signal_queue *q, uint32_t class_id,
+                              struct signal_queue_item *out)
 {
     size_t best = 0;
     size_t i;
     int found = 0;
 
+    if (class_id == SIGNAL_CLASS_URGENT) {
+        return -1;
+    }
     if (q == NULL || out == NULL || q->count == 0) {
         return -1;
     }
 
     for (i = 0; i < q->count; i++) {
-        if (q->items[i].body.class_id != SIGNAL_CLASS_BACKGROUND) {
+        if (q->items[i].body.class_id != class_id) {
             continue;
         }
         if (!found || arrived_later(&q->items[i], &q->items[best])) {
@@ -126,6 +129,12 @@ int signal_queue_evict_background(struct signal_queue *q,
     *out = q->items[best];
     remove_at(q, best);
     return 0;
+}
+
+int signal_queue_evict_background(struct signal_queue *q,
+                                  struct signal_queue_item *out)
+{
+    return signal_queue_evict_newest(q, SIGNAL_CLASS_BACKGROUND, out);
 }
 
 size_t signal_queue_count(const struct signal_queue *q)
