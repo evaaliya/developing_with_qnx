@@ -55,6 +55,17 @@ static int install_alarm(void)
     return 0;
 }
 
+static int pin_cpu0(void)
+{
+    /* Bit 0 is CPU 0. The mask is the pointer value, not a pointer. */
+    if (ThreadCtl(_NTO_TCTL_RUNMASK, (void *)(uintptr_t)1) == -1) {
+        fprintf(stderr, "sink: pinning this thread to CPU 0 failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static int64_t monotonic_ns(void)
 {
     struct timespec ts;
@@ -243,11 +254,21 @@ int main(int argc, char **argv)
     int64_t gap_ns;
     int finished = 0;
     int manifest_seen = 0;
+    int pin = 0;
+    int arg0 = 1;
 
-    if ((argc != 2 && argc != 3) ||
-        parse_count(argv[1], &expected, 0) != 0 ||
-        (argc == 3 && parse_count(argv[2], &gap_ms, 0) != 0)) {
-        fprintf(stderr, "usage: sink <signal-count> [urgent-gap-ms]\n");
+    if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
+        if (strcmp(argv[2], "0") != 0) {
+            fprintf(stderr, "usage: sink [-c 0] <signal-count> [urgent-gap-ms]\n");
+            return EXIT_FAILURE;
+        }
+        pin = 1;
+        arg0 = 3;
+    }
+    if ((argc - arg0 != 1 && argc - arg0 != 2) ||
+        parse_count(argv[arg0], &expected, 0) != 0 ||
+        (argc - arg0 == 2 && parse_count(argv[arg0 + 1], &gap_ms, 0) != 0)) {
+        fprintf(stderr, "usage: sink [-c 0] <signal-count> [urgent-gap-ms]\n");
         return EXIT_FAILURE;
     }
     if (expected > SIGNAL_LEDGER_CAP) {
@@ -261,6 +282,9 @@ int main(int argc, char **argv)
      */
 
     if (install_alarm() == -1) {
+        return EXIT_FAILURE;
+    }
+    if (pin && pin_cpu0() != 0) {
         return EXIT_FAILURE;
     }
 
