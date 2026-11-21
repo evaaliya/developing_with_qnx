@@ -9,10 +9,12 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <sys/dispatch.h>
 #include <sys/iomsg.h>
@@ -33,6 +35,9 @@ struct relay {
     pthread_cond_t ready;
     uint64_t next_order;
     int own_priority;
+    pthread_t forward;
+    int forward_prio;
+    sig_atomic_t boosts;
     int next_coid;
     int link_down;
     int manifest_waiting;
@@ -57,6 +62,69 @@ static int set_fifo(const char *who, int priority)
         return -1;
     }
     return 0;
+}
+
+static struct relay *stop_relay;
+static volatile sig_atomic_t boosts_printed;
+
+/* One line at the end. A line per boost would move the latency numbers. */
+static void emit_boosts(void)
+{
+    char line[128];
+    int n;
+
+    if (stop_relay == NULL || boosts_printed) {
+        return;
+    }
+    boosts_printed = 1;
+    n = snprintf(line, sizeof line, "relay %s: boosts %d\n",
+                 stop_relay->own_name, (int)stop_relay->boosts);
+    if (n > 0 && n < (int)sizeof line) {
+        if (write(STDOUT_FILENO, line, (size_t)n) < 0) {
+            return;
+        }
+    }
+}
+
+static void on_stop(int signo)
+{
+    (void)signo;
+    emit_boosts();
+    _exit(EXIT_SUCCESS);
+}
+
+/* The caller holds node->lock. Raise the forward thread, then wake it. */
+static void wake_forward_locked(struct relay *node)
+{
+    int top = signal_queue_top_priority(&node->queue);
+
+    if (top > node->forward_prio) {
+        int rc = pthread_setschedprio(node->forward, top);
+
+        if (rc != 0) {
+            fprintf(stderr, "relay %s: setting priority %d failed: %s\n",
+                    node->own_name, top, strerror(rc));
+            exit(EXIT_FAILURE);
+        }
+        node->forward_prio = top;
+        node->boosts++;
+    }
+    pthread_cond_signal(&node->ready);
+}
+
+/* The caller holds node->lock. This thread is the forward thread. */
+static void settle_forward_locked(struct relay *node)
+{
+    int top = signal_queue_top_priority(&node->queue);
+    int next = node->own_priority;
+
+    if (top > next) {
+        next = top;
+    }
+    if (set_fifo(node->own_name, next) != 0) {
+        exit(EXIT_FAILURE);
+    }
+    node->forward_prio = next;
 }
 
 static int pin_cpu0(const char *who)
@@ -218,7 +286,7 @@ static void send_failed(struct relay *node, int coid, const struct signal *curre
     pthread_mutex_lock(&node->lock);
     node->next_coid = fresh;
     node->link_down = 0;
-    pthread_cond_signal(&node->ready);
+    wake_forward_locked(node);
     pthread_mutex_unlock(&node->lock);
 }
 
@@ -308,6 +376,9 @@ static void *forward_main(void *arg)
 
         if (have_manifest) {
             sent = MsgSend(coid, &manifest, sizeof manifest, NULL, 0);
+            pthread_mutex_lock(&node->lock);
+            settle_forward_locked(node);
+            pthread_mutex_unlock(&node->lock);
             if (sent == -1) {
                 pthread_mutex_lock(&node->lock);
                 node->manifest = manifest;
@@ -358,9 +429,9 @@ static void *forward_main(void *arg)
         message.body = item.body;
         memset(&reply, 0, sizeof reply);
         sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
-        if (set_fifo(node->own_name, node->own_priority) != 0) {
-            exit(EXIT_FAILURE);
-        }
+        pthread_mutex_lock(&node->lock);
+        settle_forward_locked(node);
+        pthread_mutex_unlock(&node->lock);
         if (sent == -1) {
             fprintf(stderr, "relay %s: sending signal %" PRIu64 " to %s failed: %s\n",
                     node->own_name, item.body.number, node->next_name,
@@ -405,7 +476,7 @@ static int enqueue(struct relay *node, const struct signal *sig, int64_t arrival
     rc = signal_queue_push(&node->queue, sig, arrival_ns, node->next_order);
     if (rc == 0) {
         node->next_order++;
-        pthread_cond_signal(&node->ready);
+        wake_forward_locked(node);
     }
     pthread_mutex_unlock(&node->lock);
     return rc;
@@ -488,7 +559,6 @@ int main(int argc, char **argv)
 {
     struct relay node;
     name_attach_t *attach;
-    pthread_t forward;
     int ceiling;
     int create_rc;
     union {
@@ -531,6 +601,18 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
         node.own_priority = param.sched_priority;
+        node.forward_prio = node.own_priority;
+    }
+    stop_relay = &node;
+    if (signal(SIGTERM, on_stop) == SIG_ERR || signal(SIGINT, on_stop) == SIG_ERR) {
+        fprintf(stderr, "relay %s: could not catch the stop signal: %s\n",
+                node.own_name, strerror(errno));
+        return EXIT_FAILURE;
+    }
+    if (atexit(emit_boosts) != 0) {
+        fprintf(stderr, "relay %s: could not register the boost line\n",
+                node.own_name);
+        return EXIT_FAILURE;
     }
 
     ceiling = sched_get_priority_max(SCHED_FIFO);
@@ -553,7 +635,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    create_rc = pthread_create(&forward, NULL, forward_main, &node);
+    create_rc = pthread_create(&node.forward, NULL, forward_main, &node);
     if (create_rc != 0) {
         fprintf(stderr, "relay %s: could not start the forward thread: %s\n",
                 node.own_name, strerror(create_rc));
@@ -610,7 +692,7 @@ int main(int argc, char **argv)
                         closed = node.next_coid;
                         node.next_coid = -1;
                         node.link_down = 1;
-                        pthread_cond_signal(&node.ready);
+                        wake_forward_locked(&node);
                     }
                     pthread_mutex_unlock(&node.lock);
                     if (closed != -1) {
@@ -666,7 +748,7 @@ int main(int argc, char **argv)
             mark_dropped(&node, &node.manifest);
             node.manifest_rcvid = rcvid;
             node.manifest_waiting = 1;
-            pthread_cond_signal(&node.ready);
+            wake_forward_locked(&node);
             pthread_mutex_unlock(&node.lock);
             if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
