@@ -1,4 +1,5 @@
 #include "signal_queue.h"
+#include "signal_sched.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -259,6 +260,25 @@ int main(void)
     expect_int("all-urgent signal 21 stayed", contains_number(&q, 21), 1);
     expect_int("all-urgent signal 22 stayed", contains_number(&q, 22), 1);
     expect_int("all-urgent signal 23 stayed", contains_number(&q, 23), 1);
+
+    signal_queue_init(&q);
+    expect_int("empty queue top priority", signal_queue_top_priority(&q), -1);
+    expect_int("one background top priority",
+               push(&q, 1, SIGNAL_CLASS_BACKGROUND, 10, 1), 0);
+    expect_int("one background is its class priority",
+               signal_queue_top_priority(&q), SIGNAL_PRIO_BACKGROUND);
+    expect_int("urgent beside background",
+               push(&q, 2, SIGNAL_CLASS_URGENT, 20, 2), 0);
+    expect_int("urgent outranks background",
+               signal_queue_top_priority(&q), SIGNAL_PRIO_URGENT);
+    expect_int("pop the urgent", signal_queue_pop(&q, &item), 0);
+    expect_u64("popped urgent is signal 2", item.body.number, 2);
+    expect_int("background priority returns after the urgent leaves",
+               signal_queue_top_priority(&q), SIGNAL_PRIO_BACKGROUND);
+    expect_int("command without urgent",
+               push(&q, 3, SIGNAL_CLASS_COMMAND, 30, 3), 0);
+    expect_int("command outranks background when no urgent remains",
+               signal_queue_top_priority(&q), SIGNAL_PRIO_COMMAND);
 
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);

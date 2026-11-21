@@ -1,4 +1,5 @@
 #include "signal_queue.h"
+#include "signal_sched.h"
 
 #include <string.h>
 
@@ -135,6 +136,24 @@ int signal_queue_evict_background(struct signal_queue *q,
                                   struct signal_queue_item *out)
 {
     return signal_queue_evict_newest(q, SIGNAL_CLASS_BACKGROUND, out);
+}
+
+int signal_queue_top_priority(const struct signal_queue *q)
+{
+    size_t best;
+    size_t i;
+
+    if (q == NULL || q->count == 0) {
+        return -1;
+    }
+
+    best = 0;
+    for (i = 1; i < q->count; i++) {
+        if (leaves_before(&q->items[i], &q->items[best])) {
+            best = i;
+        }
+    }
+    return signal_class_priority(q->items[best].body.class_id);
 }
 
 size_t signal_queue_count(const struct signal_queue *q)

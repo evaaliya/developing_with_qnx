@@ -54,6 +54,12 @@ int signal_queue_evict_newest(struct signal_queue *q, uint32_t class_id,
 int signal_queue_evict_background(struct signal_queue *q,
                                   struct signal_queue_item *out);
 
+/*
+ * Priority of the class that would leave first, via signal_class_priority.
+ * -1 when q is NULL or the queue is empty.
+ */
+int signal_queue_top_priority(const struct signal_queue *q);
+
 size_t signal_queue_count(const struct signal_queue *q);
 
 /* NULL when q is NULL or index is past the end. Order is storage order. */
