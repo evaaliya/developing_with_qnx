@@ -594,3 +594,69 @@ sink: summary COMMAND received 3, on time 3, late 0, lost 0, dropped 0
 sink: summary BACKGROUND received 3, on time 3, late 0, lost 0, dropped 37
 sink: unaccounted 0
 ```
+
+## 2026-11-21 18:19:02 +06 · flood, queue 6, one run, not a measurement
+
+`make run-flood FLOOD_QUEUE=6` from `<project-dir>`. `date` printed `2026-11-21 18:19:02 +0600` before the command and `2026-11-21 18:19:08 +0600` after it. Exit code 0. Same guest as the 00:42 run: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`, QEMU `-accel tcg`, CPU 0 pin unchanged. Relay A used `-q 6`. Relay B kept the default queue of 64. Source sent 3 URGENT, 3 COMMAND, and 40 BACKGROUND, then the manifest, and exited 0. The deadline is still the 1 second placeholder. Hop times are omitted; they are this run only.
+
+Relay A printed 40 `dropped signal` lines, every one `class BACKGROUND`. The first three numbers are 7, 4, and 1, then 10 through 46. There is no dropped URGENT and no dropped COMMAND. The forward thread's first send is signal 3, with 2, 5, 6, 8, and 9 still queued. Signal 1 is not among the sends.
+
+That split is not "BACKGROUND received 1, dropped 39". Sink printed received 0 and dropped 40 for BACKGROUND, URGENT on time 3, COMMAND on time 3, `state DEGRADED`, and `unaccounted 0`. The code was not changed to chase the other split. Source stays on CPU 0 at the class priority, above the forward thread at 10, so the forward thread runs when a `MsgSend` blocks. On the 00:42 run with `-q 8`, signal 1 was popped while the queue was still empty, and the next eight signals sat there. On this run the first six signals were queued before that pop. Incoming BACKGROUND 7 was dropped because the queue was already full. COMMAND 8 then evicted the newest BACKGROUND still queued, signal 4. URGENT 9 evicted the one BACKGROUND left, signal 1. Signals 10 through 46 were dropped on arrival. The queue that was forwarded is 2, 3, 5, 6, 8, and 9.
+
+```text
+--- source (exit 0) ---
+source: sent manifest of 46 signals
+source: sent 46 signals
+--- relay A ---
+relay signal-relay-a: dropped signal 7 class BACKGROUND
+relay signal-relay-a: dropped signal 4 class BACKGROUND
+relay signal-relay-a: dropped signal 1 class BACKGROUND
+relay signal-relay-a: dropped signal 10 class BACKGROUND
+relay signal-relay-a: dropped signal 46 class BACKGROUND
+relay signal-relay-a: sent signal 3 class URGENT; still waiting: signal 2 COMMAND, signal 5 COMMAND, signal 6 URGENT, signal 8 COMMAND, signal 9 URGENT
+relay signal-relay-a: sent signal 8 class COMMAND; still waiting: none
+relay signal-relay-a: forwarded manifest of 46 signals
+--- sink (exit 0) ---
+sink: state DEGRADED
+sink: summary URGENT received 3, on time 3, late 0, lost 0, dropped 0
+sink: summary COMMAND received 3, on time 3, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 0, on time 0, late 0, lost 0, dropped 40
+sink: unaccounted 0
+```
+
+Signals 11 through 45 are the same `class BACKGROUND` drop line. They are omitted here. The full log has one line each.
+
+## 2026-11-21 18:19:39 +06 · flood, queue 4, one run, not a measurement
+
+`make run-flood FLOOD_QUEUE=4` from `<project-dir>`. `date` printed `2026-11-21 18:19:39 +0600` before the command and `2026-11-21 18:19:44 +0600` after it. Exit code 0. Same guest and the same pin. Relay A used `-q 4`. Source exited 0 after sending all 46 signals and the manifest.
+
+Relay A dropped signal 4 and signal 7 as `class BACKGROUND`, then `dropped signal 8 class COMMAND` and `dropped signal 5 class COMMAND`, then signals 10 through 46 as `class BACKGROUND`. No dropped line says URGENT. The forward thread popped signal 1 while nothing else was waiting (`still waiting: none` is taken at the pop, before `MsgSend` returns). The drop lines are printed during that `MsgSend`. After it, the queue that remains is 3, 2, 6, and 9. COMMAND 8 found no BACKGROUND and was dropped. URGENT 9 then evicted the newest COMMAND, signal 5.
+
+Sink: URGENT on time 3. COMMAND received 1, dropped 2, lost 0, so the three COMMAND signals are accounted. BACKGROUND received 1, dropped 39, lost 0, so the 40 BACKGROUND signals are accounted. `sink: state DEGRADED`. `sink: unaccounted 0`.
+
+```text
+--- source (exit 0) ---
+source: sent manifest of 46 signals
+source: sent 46 signals
+--- relay A ---
+relay signal-relay-a: dropped signal 4 class BACKGROUND
+relay signal-relay-a: dropped signal 7 class BACKGROUND
+relay signal-relay-a: dropped signal 8 class COMMAND
+relay signal-relay-a: dropped signal 5 class COMMAND
+relay signal-relay-a: dropped signal 10 class BACKGROUND
+relay signal-relay-a: dropped signal 46 class BACKGROUND
+relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none
+relay signal-relay-a: sent signal 3 class URGENT; still waiting: signal 2 COMMAND, signal 6 URGENT, signal 9 URGENT
+relay signal-relay-a: sent signal 2 class COMMAND; still waiting: none
+relay signal-relay-a: forwarded manifest of 46 signals
+--- sink (exit 0) ---
+sink: state DEGRADED
+sink: summary URGENT received 3, on time 3, late 0, lost 0, dropped 0
+sink: summary COMMAND received 1, on time 1, late 0, lost 0, dropped 2
+sink: summary BACKGROUND received 1, on time 1, late 0, lost 0, dropped 39
+sink: unaccounted 0
+```
+
+Signals 11 through 45 are omitted as in the queue 6 section.
+
+The same session's `make run-flood` with the default queue of 8 exited 0 and did not repeat the 00:42 totals. Relay A dropped signal 7 and then 10 through 46, all `class BACKGROUND` (38 lines). Sink: URGENT on time 3, COMMAND on time 3, BACKGROUND received 2, dropped 38, lost 0, `unaccounted 0`. The first forward line still has signal 1 queued, so URGENT 9 evicted BACKGROUND 7. The 00:42 run had already popped signal 1, so nothing in that queue of 8 needed to be evicted. `make run` then printed 9 signals on time and `unaccounted 0`. `make run-kill` and `make run-lock` still printed the SAFE, restart, NORMAL, lost 6–18, LOCKED_SAFE, and missing-manifest lines.
