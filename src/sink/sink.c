@@ -254,7 +254,8 @@ int main(int argc, char **argv)
     int64_t gap_ns;
     int finished = 0;
     int manifest_seen = 0;
-    int pin = 0;
+    /* Default pin is the D-049 result: free runs stalled, pinned runs did not. */
+    int pin = 1;
     int arg0 = 1;
 
     if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
