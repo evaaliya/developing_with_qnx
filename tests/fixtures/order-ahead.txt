@@ -1,0 +1,1 @@
+sink: signal 1 class URGENT on time, hops 25000000 ns, 10 ns, 10 ns, total 25000020 ns

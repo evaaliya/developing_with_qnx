@@ -1,0 +1,28 @@
+latency class URGENT n 3
+latency class URGENT total n 3 median 25000020 ns p99 n/a max 25000030 ns
+latency class URGENT hop 1 n 3 median 10 ns p99 n/a max 25000000 ns
+latency class URGENT hop 2 n 3 median 10 ns p99 n/a max 20 ns
+latency class URGENT hop 3 n 3 median 1000 ns p99 n/a max 25000000 ns
+latency class COMMAND n 1
+latency class COMMAND total n 1 median 25000030 ns p99 n/a max 25000030 ns
+latency class COMMAND hop 1 n 1 median 10 ns p99 n/a max 10 ns
+latency class COMMAND hop 2 n 1 median 20 ns p99 n/a max 20 ns
+latency class COMMAND hop 3 n 1 median 25000000 ns p99 n/a max 25000000 ns
+latency class BACKGROUND n 1
+latency class BACKGROUND total n 1 median 20000007 ns p99 n/a max 20000007 ns
+latency class BACKGROUND hop 1 n 1 median 3 ns p99 n/a max 3 ns
+latency class BACKGROUND hop 2 n 1 median 4 ns p99 n/a max 4 ns
+latency class BACKGROUND hop 3 n 1 median 20000000 ns p99 n/a max 20000000 ns
+latency unparsed 0
+relay signal-relay-a R5 violations 1
+relay signal-relay-a R5 violation tests/fixtures/order-stall.txt signal 4 class COMMAND start 2000; signal 5 class URGENT arrived 1500 start 4000
+relay signal-relay-a wait behind send class URGENT n 0
+relay signal-relay-a wait behind send class COMMAND n 1 median 6000 ns p99 n/a max 6000 ns
+relay signal-relay-a wait behind send class BACKGROUND n 0
+relay signal-relay-b R5 violations 0
+relay signal-relay-b wait behind send class URGENT n 0
+relay signal-relay-b wait behind send class COMMAND n 0
+relay signal-relay-b wait behind send class BACKGROUND n 0
+relay unparsed 1
+stall runs 1
+stall run tests/fixtures/order-stall.txt median 25000000 ns

@@ -1,0 +1,9 @@
+relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none
+relay signal-relay-a: boosts 1
+relay signal-relay-a: sent signal 4 class COMMAND; still waiting: none arrived 1000 start 2000 end 3000
+relay signal-relay-a: sent signal 5 class URGENT; still waiting: none arrived 1500 start 4000 end 4500
+relay signal-relay-a: sent signal 7 class BACKGROUND; still waiting: none arrived 10000 start 11000 end 20000
+relay signal-relay-a: sent signal 8 class COMMAND; still waiting: signal 9 BACKGROUND arrived 15000 start 21000 end 22000
+relay signal-relay-b: sent signal 9 class BACKGROUND; still waiting: none arrived 100 start 200 end 300
+sink: signal 1 class URGENT on time, hops 10 ns, 20 ns, 25000000 ns, total 25000030 ns
+sink: signal 2 class COMMAND on time, hops 10 ns, 20 ns, 25000000 ns, total 25000030 ns

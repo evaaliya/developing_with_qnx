@@ -1,0 +1,2 @@
+stall runs 1
+stall run tests/fixtures/order-stall.txt median 25000000 ns

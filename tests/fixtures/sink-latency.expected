@@ -14,3 +14,6 @@ latency class BACKGROUND hop 1 n 1 median 7 ns p99 n/a max 7 ns
 latency class BACKGROUND hop 2 n 1 median 8 ns p99 n/a max 8 ns
 latency class BACKGROUND hop 3 n 1 median 9 ns p99 n/a max 9 ns
 latency unparsed 1
+relay lines 0
+relay unparsed 0
+stall runs 0

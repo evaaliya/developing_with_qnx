@@ -1,0 +1,1 @@
+sink: signal 1 class BACKGROUND on time, hops 3 ns, 4 ns, 20000000 ns, total 20000007 ns

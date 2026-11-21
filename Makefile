@@ -59,6 +59,14 @@ test: build/latency-report
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
 	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out
+	./build/latency-report tests/fixtures/order-stall.txt \
+		tests/fixtures/order-clean.txt tests/fixtures/order-edge.txt \
+		tests/fixtures/order-ahead.txt > build/order-latency.out
+	diff -u tests/fixtures/order-latency.expected build/order-latency.out
+	./build/latency-report --stalls tests/fixtures/order-stall.txt \
+		tests/fixtures/order-clean.txt tests/fixtures/order-edge.txt \
+		tests/fixtures/order-ahead.txt > build/order-stalls.out
+	diff -u tests/fixtures/order-stalls.expected build/order-stalls.out
 
 clean:
 	rm -rf build
