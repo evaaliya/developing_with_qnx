@@ -124,10 +124,10 @@ static void write_lost(const struct relay *node, const struct signal *sig)
 }
 
 /* Receive thread only. The forward thread reads the marked manifest. */
-static void note_drop(struct relay *node, uint64_t number)
+static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
 {
-    printf("relay %s: dropped signal %" PRIu64 " class BACKGROUND\n",
-           node->own_name, number);
+    printf("relay %s: dropped signal %" PRIu64 " class %s\n",
+           node->own_name, number, signal_class_name(class_id));
     fflush(stdout);
     if (node->dropped_count >= SIGNAL_MANIFEST_CAP) {
         fprintf(stderr,
@@ -752,13 +752,45 @@ int main(int argc, char **argv)
             if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }
-            note_drop(&node, buffer.message.body.number);
+            note_drop(&node, buffer.message.body.number,
+                      buffer.message.body.class_id);
             continue;
         }
         if (full) {
             struct signal_queue_item evicted;
+            int took;
 
-            if (signal_queue_evict_background(&node.queue, &evicted) != 0) {
+            /*
+             * BACKGROUND first. A COMMAND with nowhere to go is dropped.
+             * An URGENT then takes the newest COMMAND. A queue of only
+             * URGENT signals is still EAGAIN (D-044).
+             */
+            took = signal_queue_evict_newest(&node.queue,
+                                             SIGNAL_CLASS_BACKGROUND,
+                                             &evicted);
+            if (took != 0 &&
+                buffer.message.body.class_id == SIGNAL_CLASS_COMMAND) {
+                pthread_mutex_unlock(&node.lock);
+                /* EOK: source stops the run on any other status (D-044). */
+                if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                    fprintf(stderr,
+                            "relay %s: replying to the sender failed: %s\n",
+                            node.own_name, strerror(errno));
+                    return EXIT_FAILURE;
+                }
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
+                note_drop(&node, buffer.message.body.number,
+                          buffer.message.body.class_id);
+                continue;
+            }
+            if (took != 0) {
+                took = signal_queue_evict_newest(&node.queue,
+                                                 SIGNAL_CLASS_COMMAND,
+                                                 &evicted);
+            }
+            if (took != 0) {
                 pthread_mutex_unlock(&node.lock);
                 fprintf(stderr,
                         "relay %s: queue is full, rejecting signal %" PRIu64 "\n",
@@ -773,7 +805,7 @@ int main(int argc, char **argv)
                 continue;
             }
             pthread_mutex_unlock(&node.lock);
-            if (evicted.body.class_id != SIGNAL_CLASS_BACKGROUND) {
+            if (evicted.body.class_id == SIGNAL_CLASS_URGENT) {
                 fprintf(stderr,
                         "relay %s: eviction returned signal %" PRIu64
                         " class %s\n",
@@ -781,7 +813,7 @@ int main(int argc, char **argv)
                         signal_class_name(evicted.body.class_id));
                 return EXIT_FAILURE;
             }
-            note_drop(&node, evicted.body.number);
+            note_drop(&node, evicted.body.number, evicted.body.class_id);
         } else {
             pthread_mutex_unlock(&node.lock);
         }
