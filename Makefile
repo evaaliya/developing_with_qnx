@@ -38,11 +38,14 @@ test:
 		tests/test_restart.c src/common/restart_limit.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-ledger \
 		tests/test_ledger.c src/common/signal_ledger.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-latency-stats \
+		tests/test_latency_stats.c src/common/latency_stats.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
 	./build/test-restart
 	./build/test-ledger
+	./build/test-latency-stats
 
 clean:
 	rm -rf build
