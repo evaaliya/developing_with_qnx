@@ -736,3 +736,85 @@ The B10 calm stall on hop 3 happened again, in `build/measure/flood-22.log`. All
 Every hop and total printed in the 68 logs, 6616 numbers, ends in 000, 008, or 992. No other residue modulo 1000 appears. That is the same limit as F-022.
 
 Separate from `make measure`, this session ran the regression after the code change. `make run-flood` exited 0, source exit 0, dropped signals 10 through 46, all `class BACKGROUND` (37 lines), URGENT on time 3, COMMAND on time 3, BACKGROUND received 3, dropped 37, `unaccounted 0`. `make run-flood FLOOD_QUEUE=4` exited 0, source exit 0, 9 dropped lines, all `class BACKGROUND`, URGENT and COMMAND dropped 0, BACKGROUND received 31, `unaccounted 0`. The queue 4 and queue 6 drop tables from the earlier batch no longer apply, because the forward thread drains the queue during the burst. `make run` exited 0 with 9 signals on time, dropped 0, lost 0, `unaccounted 0`, and the hop 3 stall described above. `make run-kill` exited 0 and printed `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, and `sink: unaccounted 0`. `make run-lock` exited 0, restarted relay B once, printed `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, did not start relay B a third time, and sink printed that the manifest did not arrive.
+
+## R5 and the wait behind a send
+
+`make measure` from `<project-dir>`, N=34, seeds equal to the run numbers. `date` printed `2026-11-21 22:47:18 +0600` before the command and `2026-11-21 22:47:57 +0600` after it. Exit code 0. 34 calm logs and 34 flood logs. Each log contains `sink: unaccounted 0`. The host report printed `latency unparsed 0` and `relay unparsed 0` for each scenario. URGENT n is 102 in both scenarios. Sink summaries give URGENT received 3, on time 3, dropped 0 in every log, and the same for COMMAND. BACKGROUND dropped 0 in every calm log. Flood sink summaries add to 476 dropped BACKGROUND and 0 dropped URGENT or COMMAND.
+
+Each relay send line now ends with `arrived`, `start`, and `end`. `arrived` is that relay's own hop stamp. `start` is `CLOCK_MONOTONIC` immediately before `MsgSend`. `end` is the same clock immediately after. The host report counts two things on each relay, inside one log, then sums across the logs of a scenario.
+
+An R5 violation is a less urgent signal L whose `MsgSend` starts while a more urgent signal U is already on that relay and has not started: `arrive(U) < start(L) < start(U)`. A wait behind a send is a signal U that arrives during some other signal's send: `start(L) < arrive(U) < end(L)`. The wait is `start(U) - arrive(U)`. The report prints every violation with the log name and both signal numbers. One flood line is:
+
+`relay signal-relay-a R5 violation build/measure/flood-01.log signal 4 class COMMAND start 262474713215008; signal 5 class URGENT arrived 262474712712000 start 262474714627008`
+
+There `262474712712000 < 262474713215008 < 262474714627008`.
+
+(r) is unmet. Violation counts, sink still free to leave CPU 0:
+
+| Scenario | relay A | relay B |
+| --- | ---: | ---: |
+| calm | 76 | 88 |
+| flood | 64 | 105 |
+
+Waits behind a send on that run:
+
+| Scenario | Relay | Class | n | median ns | p99 ns | max ns |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| calm | A | URGENT | 25 | 1240992 | n/a | 3618000 |
+| calm | A | COMMAND | 20 | 1054992 | n/a | 2623008 |
+| calm | A | BACKGROUND | 6 | 3380504 | n/a | 5870992 |
+| calm | B | URGENT | 7 | 564000 | n/a | 3471008 |
+| calm | B | COMMAND | 0 |  |  |  |
+| calm | B | BACKGROUND | 9 | 1166992 | n/a | 2123008 |
+| flood | A | URGENT | 24 | 1110000 | n/a | 14172000 |
+| flood | A | COMMAND | 18 | 1062504 | n/a | 14932000 |
+| flood | A | BACKGROUND | 681 | 6608000 | 15164000 | 15680000 |
+| flood | B | URGENT | 9 | 570992 | n/a | 1946992 |
+| flood | B | COMMAND | 0 |  |  |  |
+| flood | B | BACKGROUND | 11 | 1222000 | n/a | 4356000 |
+
+The same measure, after the sink default became a pin to CPU 0, ran from `2026-11-21 22:50:55 +0600` to `2026-11-21 22:51:32 +0600`. Exit code 0. Again 68 logs, `unaccounted 0` in each, `latency unparsed 0`, `relay unparsed 0`, URGENT n 102 in both scenarios. (r) is unmet again: calm relay A 68 and relay B 77; flood relay A 64 and relay B 106. The report printed every violation. Waits on that second run: calm relay A URGENT n 24 median 984504 ns max 3332992 ns, COMMAND n 18 median 1020000 ns max 2222000 ns, BACKGROUND n 5 median 3102992 ns max 5330992 ns; calm relay B URGENT n 8 median 720496 ns max 3206992 ns, COMMAND n 0, BACKGROUND n 8 median 1022000 ns max 2198992 ns; flood relay A URGENT n 23 median 1056000 ns max 2306000 ns, COMMAND n 17 median 990000 ns max 2194992 ns, BACKGROUND n 703 median 6734000 ns p99 10790992 ns max 13994000 ns; flood relay B URGENT n 9 median 672992 ns max 2234992 ns, COMMAND n 0, BACKGROUND n 13 median 997008 ns max 1818992 ns.
+
+## Shuffled issue order, full latency
+
+The class-order line was fixed before either measure. Under flood, with each complete triple shuffled, the full-latency medians go strictly URGENT, then COMMAND, then BACKGROUND.
+
+`make run` and `make run-flood` do not pass a seed. Their source log is still background, command, urgent. The seeded calm-01 log starts urgent, command, background.
+
+Guest, from `uname -a` on the same ssh port in this session: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`.
+
+| Class | Scenario | Sink | n | total median ns | total p99 ns | total max ns |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| URGENT | calm | free | 102 | 2693000 | 6296000 | 6557008 |
+| URGENT | flood | free | 102 | 3046000 | 55083008 | 55262000 |
+| COMMAND | calm | free | 102 | 3365992 | 6725008 | 7286000 |
+| COMMAND | flood | free | 102 | 3391496 | 57978000 | 58874992 |
+| BACKGROUND | calm | free | 102 | 5162496 | 8740000 | 9733008 |
+| BACKGROUND | flood | free | 884 | 7957000 | 20702000 | 60334000 |
+| URGENT | calm | pinned | 102 | 2526504 | 49778000 | 51029008 |
+| URGENT | flood | pinned | 102 | 3065504 | 18546000 | 19535008 |
+| COMMAND | calm | pinned | 102 | 3543992 | 51704000 | 52940992 |
+| COMMAND | flood | pinned | 102 | 3376000 | 19590000 | 19918000 |
+| BACKGROUND | calm | pinned | 102 | 5182496 | 52206000 | 53378992 |
+| BACKGROUND | flood | pinned | 915 | 8024000 | 18476992 | 21961008 |
+
+(b') met on the free-sink flood row: 3046000 < 3391496 < 7957000. (b') met again on the pinned-sink flood row: 3065504 < 3376000 < 8024000. The criterion was not changed between the runs. The free-sink measure printed `stall runs 0` for both scenarios. The pinned-sink calm scenario printed one stall, `build/measure/calm-31.log`, hop-3 median 50280000 ns (9 signals, hop 3 from 48224000 ns to 51386000 ns). Its flood scenario printed `stall runs 0`.
+
+## Sink stall experiment
+
+A stall run is a run whose median relay-B-to-sink hop, across the signals in that log, is greater than 20 ms. The rule was fixed before the runs: 20 calm runs with sink free, then 20 with sink pinned to CPU 0. If the pinned group has 0 stalls and the free group has at least 1, sink pins to CPU 0 by default.
+
+`make stall-check` from `2026-11-21 22:48:28 +0600` to `2026-11-21 22:48:52 +0600`. Exit code 0. 20 logs in `build/stall/free-*.log` and 20 in `build/stall/pinned-*.log`. The report printed:
+
+```
+=== free ===
+stall runs 2
+stall run build/stall/free-01.log median 56589008 ns
+stall run build/stall/free-04.log median 49935008 ns
+=== pinned ===
+stall runs 0
+```
+
+Those two medians match the sink lines: free-01 hop 3 from 52943008 ns to 58604000 ns, median 56589008 ns; free-04 hop 3 from 46762000 ns to 52669008 ns, median 49935008 ns. The rule fired. Sink now pins its thread to CPU 0 with `ThreadCtl`. `-c 0` is still accepted and is the same pin. The follow-up measure in the previous section is that default. One later shuffled calm log, `calm-31`, still has a hop-3 median above 20 ms, so the pin removed the stalls inside this 20-and-20 experiment and did not remove every later stall.
+
+After that pin was the default, regression on the guest exited 0. `make run` at 22:50:07 +06: source order background, command, urgent; 9 signals on time; dropped 0; lost 0; `unaccounted 0`. `make run-flood`: source exit 0; the same fixed order; dropped signals 28, 31, 36, 39, 42, and 45, all `class BACKGROUND`; URGENT on time 3; COMMAND on time 3; BACKGROUND received 34, dropped 6; `unaccounted 0`. `make run-kill`: `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, `unaccounted 0`. `make run-lock`: one `supervisor: restarted relay-b`, then `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, no third start, and sink printed that the manifest did not arrive.
