@@ -50,12 +50,15 @@ test: build/latency-report
 		tests/test_ledger.c src/common/signal_ledger.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-latency-stats \
 		tests/test_latency_stats.c src/common/latency_stats.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-issue-order \
+		tests/test_issue_order.c src/common/issue_order.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
 	./build/test-restart
 	./build/test-ledger
 	./build/test-latency-stats
+	./build/test-issue-order
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
 	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out
