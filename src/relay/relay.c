@@ -38,6 +38,7 @@ struct relay {
     pthread_t forward;
     int forward_prio;
     sig_atomic_t boosts;
+    sig_atomic_t repicks;
     int next_coid;
     int link_down;
     int manifest_waiting;
@@ -79,6 +80,13 @@ static void emit_boosts(void)
     boosts_printed = 1;
     n = snprintf(line, sizeof line, "relay %s: boosts %d\n",
                  stop_relay->own_name, (int)stop_relay->boosts);
+    if (n > 0 && n < (int)sizeof line) {
+        if (write(STDOUT_FILENO, line, (size_t)n) < 0) {
+            return;
+        }
+    }
+    n = snprintf(line, sizeof line, "relay %s: repicks %d\n",
+                 stop_relay->own_name, (int)stop_relay->repicks);
     if (n > 0 && n < (int)sizeof line) {
         if (write(STDOUT_FILENO, line, (size_t)n) < 0) {
             return;
@@ -345,6 +353,7 @@ static void *forward_main(void *arg)
         int priority;
         long sent;
         int64_t arrived_ns = 0;
+        int64_t picked_ns = 0;
         int64_t start_ns = 0;
         int64_t end_ns = 0;
 
@@ -434,12 +443,54 @@ static void *forward_main(void *arg)
         /*
          * arrived is this node's own hop stamp (D-048). start is the
          * clock immediately before MsgSend, end immediately after.
+         * picked is the clock under the lock after the last repick
+         * and before that send (D-051).
          */
         if (item.body.hop_count >= 1 &&
             item.body.hop_count <= SIGNAL_MAX_HOPS) {
             arrived_ns = item.body.hop_ns[item.body.hop_count - 1];
         } else {
             arrived_ns = 0;
+        }
+        {
+            int exchanged = 0;
+            int repick_rc;
+
+            pthread_mutex_lock(&node->lock);
+            while ((repick_rc = signal_queue_repick(&node->queue, &item)) == 1) {
+                node->repicks++;
+                exchanged = 1;
+            }
+            picked_ns = monotonic_ns(node->own_name);
+            if (exchanged) {
+                format_waiting(&node->queue, waiting, sizeof waiting);
+            }
+            pthread_mutex_unlock(&node->lock);
+            if (repick_rc < 0) {
+                fprintf(stderr, "relay %s: choosing again for signal %" PRIu64
+                        " failed\n",
+                        node->own_name, item.body.number);
+                exit(EXIT_FAILURE);
+            }
+            if (exchanged) {
+                priority = signal_class_priority(item.body.class_id);
+                if (priority < 0 || set_fifo(node->own_name, priority) != 0) {
+                    fprintf(stderr,
+                            "relay %s: signal %" PRIu64 " has no class priority\n",
+                            node->own_name, item.body.number);
+                    exit(EXIT_FAILURE);
+                }
+                memset(&message, 0, sizeof message);
+                message.type = SIGNAL_MSG_TYPE;
+                message.body = item.body;
+                memset(&reply, 0, sizeof reply);
+                if (item.body.hop_count >= 1 &&
+                    item.body.hop_count <= SIGNAL_MAX_HOPS) {
+                    arrived_ns = item.body.hop_ns[item.body.hop_count - 1];
+                } else {
+                    arrived_ns = 0;
+                }
+            }
         }
         start_ns = monotonic_ns(node->own_name);
         sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
@@ -463,11 +514,11 @@ static void *forward_main(void *arg)
 
         printf("relay %s: sent signal %" PRIu64
                " class %s; still waiting: %s arrived %" PRId64
-               " start %" PRId64 " end %" PRId64 "\n",
+               " start %" PRId64 " end %" PRId64 " picked %" PRId64 "\n",
                node->own_name, item.body.number,
                signal_class_name(item.body.class_id),
                waiting[0] == '\0' ? "none" : waiting,
-               arrived_ns, start_ns, end_ns);
+               arrived_ns, start_ns, end_ns, picked_ns);
         fflush(stdout);
     }
     return NULL;

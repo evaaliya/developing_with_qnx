@@ -280,6 +280,159 @@ int main(void)
     expect_int("command outranks background when no urgent remains",
                signal_queue_top_priority(&q), SIGNAL_PRIO_COMMAND);
 
+    signal_queue_init(&q);
+    expect_int("repick setup background",
+               push(&q, 1, SIGNAL_CLASS_BACKGROUND, 10, 1), 0);
+    expect_int("repick setup urgent",
+               push(&q, 3, SIGNAL_CLASS_URGENT, 30, 3), 0);
+    {
+        struct signal_queue_item held;
+
+        memset(&held, 0, sizeof held);
+        held.body = make_signal(2, SIGNAL_CLASS_COMMAND);
+        held.arrival_ns = 20;
+        held.arrival_order = 2;
+        expect_int("repick count before the exchange",
+                   (int)signal_queue_count(&q), 2);
+        expect_int("repick exchanges a more urgent item",
+                   signal_queue_repick(&q, &held), 1);
+        expect_int("repick count stays the same",
+                   (int)signal_queue_count(&q), 2);
+        expect_u64("repick holds the urgent", held.body.number, 3);
+        expect_int("repick kept the urgent arrival time",
+                   (int)held.arrival_ns, 30);
+        expect_u64("repick kept the urgent arrival order", held.arrival_order, 3);
+        expect_int("returned command is back in the queue",
+                   contains_number(&q, 2), 1);
+        expect_int("background stayed beside the returned command",
+                   contains_number(&q, 1), 1);
+        expect_int("pop the returned command before the background",
+                   signal_queue_pop(&q, &item), 0);
+        expect_u64("returned command leaves first", item.body.number, 2);
+        expect_int("returned command keeps its arrival time",
+                   (int)item.arrival_ns, 20);
+        expect_u64("returned command keeps its arrival order",
+                   item.arrival_order, 2);
+        expect_int("then the background", signal_queue_pop(&q, &item), 0);
+        expect_u64("background leaves after the returned command",
+                   item.body.number, 1);
+    }
+
+    signal_queue_init(&q);
+    expect_int("equal class earlier command",
+               push(&q, 2, SIGNAL_CLASS_COMMAND, 1, 1), 0);
+    {
+        struct signal_queue_item held;
+
+        memset(&held, 0, sizeof held);
+        held.body = make_signal(7, SIGNAL_CLASS_COMMAND);
+        held.arrival_ns = 50;
+        held.arrival_order = 9;
+        expect_int("equal class does not exchange",
+                   signal_queue_repick(&q, &held), 0);
+        expect_u64("equal class leaves the held signal", held.body.number, 7);
+        expect_int("equal class leaves the held arrival time",
+                   (int)held.arrival_ns, 50);
+        expect_u64("equal class leaves the held arrival order",
+                   held.arrival_order, 9);
+        expect_int("equal class leaves the count",
+                   (int)signal_queue_count(&q), 1);
+        expect_int("equal class leaves the queued signal",
+                   contains_number(&q, 2), 1);
+        expect_int("the queued signal was not the held one",
+                   contains_number(&q, 7), 0);
+    }
+
+    signal_queue_init(&q);
+    {
+        struct signal_queue_item held;
+
+        memset(&held, 0, sizeof held);
+        held.body = make_signal(4, SIGNAL_CLASS_BACKGROUND);
+        held.arrival_ns = 8;
+        held.arrival_order = 8;
+        expect_int("empty queue does not exchange",
+                   signal_queue_repick(&q, &held), 0);
+        expect_u64("empty queue leaves the held signal", held.body.number, 4);
+        expect_int("empty queue stays empty", (int)signal_queue_count(&q), 0);
+    }
+
+    signal_queue_init(&q);
+    expect_int("fifo earlier command",
+               push(&q, 10, SIGNAL_CLASS_COMMAND, 10, 1), 0);
+    expect_int("fifo urgent",
+               push(&q, 99, SIGNAL_CLASS_URGENT, 1, 9), 0);
+    expect_int("fifo later command",
+               push(&q, 30, SIGNAL_CLASS_COMMAND, 40, 4), 0);
+    {
+        struct signal_queue_item held;
+
+        memset(&held, 0, sizeof held);
+        held.body = make_signal(20, SIGNAL_CLASS_COMMAND);
+        held.arrival_ns = 20;
+        held.arrival_order = 2;
+        expect_int("fifo exchange takes the urgent",
+                   signal_queue_repick(&q, &held), 1);
+        expect_u64("fifo held is the urgent", held.body.number, 99);
+        expect_int("fifo count is unchanged", (int)signal_queue_count(&q), 3);
+        expect_int("fifo pop the earlier command",
+                   signal_queue_pop(&q, &item), 0);
+        expect_u64("earlier command is still first in its class",
+                   item.body.number, 10);
+        expect_int("fifo pop the returned command",
+                   signal_queue_pop(&q, &item), 0);
+        expect_u64("returned command is between its classmates",
+                   item.body.number, 20);
+        expect_int("returned command is still at its arrival time",
+                   (int)item.arrival_ns, 20);
+        expect_u64("returned command is still at its arrival order",
+                   item.arrival_order, 2);
+        expect_int("fifo pop the later command",
+                   signal_queue_pop(&q, &item), 0);
+        expect_u64("later command stays last in its class", item.body.number, 30);
+    }
+
+    signal_queue_init(&q);
+    for (i = 0; i < SIGNAL_QUEUE_CAP; i++) {
+        rc = push(&q, (uint64_t)(i + 1), SIGNAL_CLASS_COMMAND,
+                  (int64_t)(i + 1), (uint64_t)(i + 1));
+        if (rc != 0) {
+            expect_int("repick fill to capacity", rc, 0);
+            break;
+        }
+    }
+    {
+        struct signal_queue_item held;
+
+        memset(&held, 0, sizeof held);
+        held.body = make_signal(1000, SIGNAL_CLASS_BACKGROUND);
+        held.arrival_ns = 999;
+        held.arrival_order = 999;
+        expect_int("full queue before repick",
+                   (int)signal_queue_count(&q), SIGNAL_QUEUE_CAP);
+        expect_int("repick exchanges on a full queue",
+                   signal_queue_repick(&q, &held), 1);
+        expect_int("full queue count stays at capacity",
+                   (int)signal_queue_count(&q), SIGNAL_QUEUE_CAP);
+        expect_u64("full queue repick holds the earliest command",
+                   held.body.number, 1);
+        expect_int("full queue repick keeps that arrival time",
+                   (int)held.arrival_ns, 1);
+        expect_u64("full queue repick keeps that arrival order",
+                   held.arrival_order, 1);
+        expect_int("the returned background fits in the full queue",
+                   contains_number(&q, 1000), 1);
+        expect_int("full queue pop the next command",
+                   signal_queue_pop(&q, &item), 0);
+        expect_u64("the next command is still first", item.body.number, 2);
+    }
+
+    signal_queue_init(&q);
+    expect_int("null repick queue", signal_queue_repick(NULL, &item), -1);
+    expect_int("null repick held", signal_queue_repick(&q, NULL), -1);
+    expect_int("null repick leaves an empty queue empty",
+               (int)signal_queue_count(&q), 0);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

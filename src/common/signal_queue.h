@@ -41,6 +41,17 @@ int signal_queue_push(struct signal_queue *q, const struct signal *sig,
 int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out);
 
 /*
+ * If q holds an item whose class is strictly more urgent than held
+ * (signal_class_priority), that item replaces held. The previous held
+ * returns to the queue with its own arrival_ns and arrival_order.
+ * The item taken is the one signal_queue_pop would take. An equal
+ * class does not swap, so the count stays the same and a full queue
+ * still has room. 1 when held was replaced, 0 when nothing changed,
+ * -1 when q or held is NULL.
+ */
+int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held);
+
+/*
  * Removes the newest item of class_id: larger arrival_ns, then larger
  * arrival_order. SIGNAL_CLASS_URGENT always returns -1.
  * 0 on success. -1 if q or out is NULL, the queue is empty, class_id

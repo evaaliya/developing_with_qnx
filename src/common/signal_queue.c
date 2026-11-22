@@ -79,6 +79,50 @@ int signal_queue_push(struct signal_queue *q, const struct signal *sig,
     return 0;
 }
 
+int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held)
+{
+    size_t best;
+    size_t i;
+    int held_priority;
+    int best_priority;
+    struct signal_queue_item taken;
+
+    if (q == NULL || held == NULL) {
+        return -1;
+    }
+    if (q->count == 0) {
+        return 0;
+    }
+
+    best = 0;
+    for (i = 1; i < q->count; i++) {
+        if (leaves_before(&q->items[i], &q->items[best])) {
+            best = i;
+        }
+    }
+
+    held_priority = signal_class_priority(held->body.class_id);
+    best_priority = signal_class_priority(q->items[best].body.class_id);
+    if (best_priority <= held_priority) {
+        return 0;
+    }
+
+    taken = q->items[best];
+    remove_at(q, best);
+    /*
+     * remove_at freed one slot, so this push fits even when the queue
+     * was at SIGNAL_QUEUE_CAP. The returned item keeps its arrival.
+     */
+    if (signal_queue_push(q, &held->body, held->arrival_ns,
+                          held->arrival_order) != 0) {
+        q->items[q->count] = taken;
+        q->count++;
+        return -1;
+    }
+    *held = taken;
+    return 1;
+}
+
 int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
 {
     size_t best;

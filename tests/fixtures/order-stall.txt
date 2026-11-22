@@ -1,6 +1,6 @@
 relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none
 relay signal-relay-a: boosts 1
-relay signal-relay-a: sent signal 4 class COMMAND; still waiting: none arrived 1000 start 2000 end 3000
+relay signal-relay-a: sent signal 4 class COMMAND; still waiting: none arrived 1000 start 2000 end 3000 picked 1800
 relay signal-relay-a: sent signal 5 class URGENT; still waiting: none arrived 1500 start 4000 end 4500
 relay signal-relay-a: sent signal 7 class BACKGROUND; still waiting: none arrived 10000 start 11000 end 20000
 relay signal-relay-a: sent signal 8 class COMMAND; still waiting: signal 9 BACKGROUND arrived 15000 start 21000 end 22000

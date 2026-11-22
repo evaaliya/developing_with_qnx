@@ -5,7 +5,8 @@
  * left out of that count. The percentile is omitted below 100 samples
  * (D-045).
  *
- * Relay send lines carry arrived, start, and end. A less urgent send that
+ * Relay send lines carry arrived, start, and end, and may end with
+ * picked. The picked stamp is not part of R5. A less urgent send that
  * starts while a more urgent signal is already here and not yet started
  * is one R5 violation. A signal that arrives during another send waits
  * start - arrived. An older relay line, without those stamps, is counted
@@ -284,6 +285,17 @@ static int parse_relay_send(const char *line, char *name, size_t name_len,
         return -1;
     }
     cursor = mark + consumed;
+    if (strncmp(cursor, " picked ", 8) == 0) {
+        int64_t picked_ns;
+        int picked_used = 0;
+
+        if (sscanf(cursor, " picked %" SCNd64 "%n", &picked_ns, &picked_used) != 1 ||
+            picked_used <= 0) {
+            return -1;
+        }
+        cursor += picked_used;
+        (void)picked_ns;
+    }
     while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' ||
            *cursor == '\n') {
         cursor++;
