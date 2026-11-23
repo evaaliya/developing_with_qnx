@@ -1613,3 +1613,65 @@ S1 against S2, same run, full latency in nanoseconds.
 | unaccounted | 0 | 0 |
 
 R1, the R2 share, the R2 median, and R10 passed on the thresholds above. The BACKGROUND median and maximum under the flood are higher than in S1. Every delivered BACKGROUND was still inside the 124 ms deadline.
+
+## 2026-11-24 01:52 +06 · S2 flood that outpaces the relay chain
+
+The 200 ms flood above did not overload the chain: the queue of 64 drained between batches, so each batch dropped exactly 72 − 64 = 8. The flood now sends one batch of 72 BACKGROUND every 50 ms, about 1440 signals a second, while the chain forwards about 880 a second. The queue stays 64.
+
+Two places in `source` let BACKGROUND hold back URGENT at that rate, and both are fixed:
+
+- The timer pulse used `SIGEV_PULSE_PRIO_INHERIT`, so the timer thread woke at priority 10 and got no CPU while BACKGROUND work at 12 kept CPU 0 busy. URGENT stopped being issued and sink went to SAFE during the flood. The pulse is now created at the URGENT priority, 30.
+- The `/dev/signal-source` thread took the shell's priority 10 from each message, so `flood off` waited about 4.5 s. It now runs at the COMMAND priority, 20, on its own channel with `_NTO_CHF_FIXED_PRIORITY`.
+
+Relay A prints the queue depth when each batch arrives: `batch N queued Q dropped D waiting before W`. In this run, 1 of 88 batches found the queue empty. On average 14.2 signals were waiting, and at most 33.
+
+Command, from this checkout:
+
+```text
+make scenarios
+```
+
+Exit code 0. Guest after the run:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+Table printed by that command. Every number is from this run.
+
+```text
+scenario | requirement | numbers | verdict
+S1 | R1 | URGENT on time 195/195; threshold 1 and n >= 100 | прошёл
+S1 | R3 | URGENT n 195 median 2390992 ns p99 6617008 ns max 8366992 ns; COMMAND n 7 median 4376000 ns p99 n/a max 7483008 ns; BACKGROUND n 11 median 4132000 ns p99 n/a max 11308992 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 195 COMMAND 7 BACKGROUND 11; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 215/215 against S1 195/195; threshold 1 and n >= 100 | прошёл
+S2 | R2 median | URGENT median 1031008 ns; S1 median 2390992 ns; threshold 2x S1 4781984 ns; p99 6098000 ns; max 8318000 ns; deadline 31000000 ns; n 215 | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 1955; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 1; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 6348; flood signals 6336; window ms 5000; duration ns 5033522000; span ns 5050390992; drop thirds 640/703/612 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2080546000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 3194005008 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 195/195 S4 198/198; R3 URGENT median delta -254488 ns; max delta -390000 ns; S4 median 2136504 ns max 7976992 ns; threshold fraction equal, |median delta| <= 5000000 ns, |max delta| <= 31000000 ns | прошёл
+S4 | checks | panel and telemetry killed during a 5 s window | прошёл
+scenarios failed 0
+```
+
+S1 against S2, same run, full latency in nanoseconds:
+
+| | S1 calm | S2 flood |
+| --- | --- | --- |
+| URGENT on time | 195/195 | 215/215 |
+| URGENT median, p99, max | 2390992, 6617008, 8366992 | 1031008, 6098000, 8318000 |
+| BACKGROUND delivered, median, max | 11, 4132000, 11308992 | 4393, 49574992, 114427008 |
+| BACKGROUND dropped | 0 | 1955, thirds 640/703/612 |
+| unaccounted | 0 | 0 |
+
+Under the flood, BACKGROUND waits about 12 times longer and loses 1955 signals. URGENT stays inside its 31 ms deadline, and no URGENT or COMMAND is dropped. This is one run, not a measurement series.
