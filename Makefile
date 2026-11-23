@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test run-kill run-lock run-stop run-source run-flood run-dev run-telemetry measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -74,6 +74,7 @@ test: build/latency-report
 	./build/test-source-ctl
 	./build/test-telemetry
 	/usr/bin/ruby tests/test_panel.rb
+	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
 	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out
@@ -116,6 +117,9 @@ run-source: upload
 run-dev: upload
 	$(SCP) ./scripts/qnx-dev.sh root@localhost:/tmp/qnx-dev.sh
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-dev.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-dev.sh'
+
+scenarios: upload build/latency-report
+	bash scripts/run-scenarios.sh
 
 run-telemetry: upload
 	$(SCP) ./scripts/qnx-telemetry.sh root@localhost:/tmp/qnx-telemetry.sh

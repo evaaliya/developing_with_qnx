@@ -74,6 +74,9 @@ fresh_text = PanelView.render_text(fresh)
 failures = check("just under 2 seconds is still current",
                  fresh[:kind] == "current" && fresh_text.include?("issued 424242"),
                  failures)
+fresh_html = PanelView.render_fragment(fresh)
+map_line = fresh_text.lines.find { |line| line.start_with?("map:") }
+map_html = fresh_html[/class="map">.*?<\/div>/m]
 failures = check("a current view names the chain and the mode",
                  fresh_text.include?("source (alive, restarts 0)") &&
                    fresh_text.include?("relay A (alive, restarts 0)") &&
@@ -83,6 +86,13 @@ failures = check("a current view names the chain and the mode",
                    fresh_text.include?("source mode: normal") &&
                    fresh_text.include?("median 1000 ns") &&
                    fresh_text.include?("median none"),
+                 failures)
+failures = check("telemetry is drawn off the signal path",
+                 map_line && !map_line.include?("telemetry") &&
+                   map_line.include?("→") &&
+                   fresh_text.include?("not on the signal path") &&
+                   map_html && !map_html.include?("telemetry") &&
+                   fresh_html.include?("not on the signal path"),
                  failures)
 
 stale = model.sample(now + PanelView::STALE_AFTER_S)[:view]

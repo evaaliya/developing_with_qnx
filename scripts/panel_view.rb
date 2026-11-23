@@ -265,7 +265,8 @@ module PanelView
         node = view[:nodes][name]
         "#{NODE_LABEL[name]} (#{alive_word(node['alive'])}, restarts #{node['restarts']})"
       end
-      lines << "map: #{chain.join(' → ')} → telemetry (serving)"
+      lines << "map: #{chain.join(' → ')}"
+      lines << "telemetry (serving), not on the signal path"
       lines << "state: #{view[:state]}"
       lines << "source mode: #{view[:mode]}"
       lines << "snapshot age: #{view[:age_seconds]} seconds"
@@ -318,8 +319,8 @@ module PanelView
           "<span>#{h(alive_word(node['alive']))}</span>" \
           "<span>restarts #{node['restarts']}</span></div>"
       end
-      cards << "<div class=\"node alive-1\"><strong>telemetry</strong><span>serving</span></div>"
       parts << "<div class=\"map\">#{cards.join('<span class="arrow">→</span>')}</div>"
+      parts << "<p class=\"telemetry\">telemetry (serving), not on the signal path</p>"
       rows = CLASSES.map do |name|
         row = view[:classes][name]
         "<tr><th>#{h(name)}</th><td>#{row['issued']}</td><td>#{row['on_time']}</td>" \
@@ -358,6 +359,7 @@ module PanelView
   .node.alive-0 { border-color: #b91c1c; }
   .node span, .node strong { display: block; }
   .arrow { font-size: 22px; }
+  .telemetry { margin: 4px 0 12px; color: #475569; }
   table { border-collapse: collapse; background: #fff; }
   th, td { border: 1px solid #cbd5e1; padding: 6px 10px; text-align: right; }
   th { text-align: center; }

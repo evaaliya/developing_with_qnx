@@ -553,6 +553,7 @@ static int run_live(int argc, char **argv)
     unsigned long recorded = 0;
     uint64_t number = 1;
     unsigned flood_sent = 0;
+    int64_t flood_next = 0;
     int coid;
     int timer_chid;
     int timer_coid;
@@ -634,6 +635,9 @@ static int run_live(int argc, char **argv)
            (long long)SOURCE_URGENT_PERIOD_NS,
            (long long)SOURCE_COMMAND_PERIOD_NS,
            (long long)SOURCE_BACKGROUND_PERIOD_NS);
+    printf("source: flood every %lld ns, first %u, burst %u, cap %u\n",
+           (long long)SOURCE_FLOOD_PERIOD_NS, SOURCE_FLOOD_FIRST,
+           SOURCE_FLOOD_BURST, SOURCE_FLOOD_CAP);
     fflush(stdout);
 
     memset(&manifest, 0, sizeof manifest);
@@ -659,6 +663,7 @@ static int run_live(int argc, char **argv)
         }
         if (!flood) {
             flood_sent = 0;
+            flood_next = 0;
         }
         if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
             failed = 1;
@@ -732,8 +737,14 @@ static int run_live(int argc, char **argv)
         ctl_lock();
         stop = g_ctl.stop;
         flood = g_ctl.flood;
-        extras = source_flood_burst(flood, flood_sent);
         ctl_unlock();
+        if (!flood) {
+            flood_sent = 0;
+            flood_next = 0;
+            extras = 0;
+        } else {
+            extras = source_flood_due(1, monotonic_ns(), &flood_next, flood_sent);
+        }
         if (stop) {
             break;
         }
@@ -756,6 +767,9 @@ static int run_live(int argc, char **argv)
                 if (issued == 0) {
                     break;
                 }
+                printf("source: flood signal %" PRIu64 " at %lld ns\n",
+                       number - 1, (long long)monotonic_ns());
+                fflush(stdout);
             }
             flood_sent++;
         }

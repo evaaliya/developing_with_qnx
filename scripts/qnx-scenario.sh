@@ -256,7 +256,34 @@ elif [ "$mode" = "source" ]; then
     fi
 else
     echo "scenario: killing relay-b pid $pid"
+    if [ "$mode" = "kill" ]; then
+        echo "scenario: clock before-kill $(date +%s.%N)"
+    fi
     kill -KILL "$pid"
+    if [ "$mode" = "kill" ]; then
+        s=0
+        while [ "$s" -lt 50 ]; do
+            if grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
+                echo "scenario: clock safe $(date +%s.%N)"
+                break
+            fi
+            s=$((s + 1))
+            sleep 0.2
+        done
+        s=0
+        while [ "$s" -lt 50 ]; do
+            if awk '
+                /sink: state SAFE/ { safe = 1 }
+                safe && /sink: signal / && /URGENT/ && /on time/ && /fresh/ { found = 1 }
+                END { exit found ? 0 : 1 }
+            ' /tmp/sink.out; then
+                echo "scenario: clock recovered $(date +%s.%N)"
+                break
+            fi
+            s=$((s + 1))
+            sleep 0.2
+        done
+    fi
 fi
 
 if [ "$mode" = "lock" ]; then

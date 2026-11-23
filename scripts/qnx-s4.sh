@@ -53,6 +53,19 @@ if ! grep 'sink: state NORMAL' /tmp/sink.out >/dev/null 2>&1; then
     exit 1
 fi
 
+if [ ! -e /dev/signal-source ]; then
+    echo "live: path missing" >&2
+    kill -KILL "$sup" >/dev/null 2>&1 || true
+    wait "$sup" >/dev/null 2>&1 || true
+    echo "--- supervisor ---"
+    cat /tmp/supervisor.out 2>/dev/null || true
+    echo "--- source ---"
+    cat /tmp/source.out 2>/dev/null || true
+    exit 1
+fi
+echo "live: path /dev/signal-source"
+ls -l /dev/signal-source
+
 echo "s4: live seconds $seconds"
 sleep "$seconds"
 echo "s4: stop"
