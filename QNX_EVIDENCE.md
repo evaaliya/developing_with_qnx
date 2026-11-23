@@ -851,3 +851,409 @@ Under flood the B13 medians go 1085000, then 2096008, then 6098000. That is URGE
 One calm line from the report, so the shape is visible: `relay signal-relay-b R5 violation build/measure/calm-22.log signal 1 class COMMAND start 267507464096000; signal 2 class URGENT arrived 267507464020000 start 267507465138000`. There the urgent arrival is 76000 ns before the command start.
 
 Separate from the measure, the same binary was run through `make run`, `make run-flood`, `make run-kill`, and `make run-lock` from 00:13:03 to 00:13:35 +06. Each exited 0. `make run`: source exit 0, order background, command, urgent, 9 signals on time, dropped 0, lost 0, `unaccounted 0`. `make run-flood`: source exit 0, the same order, dropped signals 40 and 43, both `class BACKGROUND`, URGENT on time 3, COMMAND on time 3, BACKGROUND received 38, dropped 2, `unaccounted 0`. `make run-kill`: `sink: state SAFE`, `supervisor: restarted relay-b`, `sink: state NORMAL` again, `lost signal` 6 through 18, `unaccounted 0`. `make run-lock`: one `supervisor: restarted relay-b`, then `supervisor: LOCKED_SAFE` and `sink: state LOCKED_SAFE`, no third start, and sink printed that the manifest did not arrive.
+
+## 2026-11-23 19:41:44 +06 · stop relay B, kill source, one run each, not a measurement
+
+Guest, from `uname -a` inside both scenario scripts, before the fault: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`. Open port 2222 is not that proof. The supervisor waits on a stopped-but-alive node and does not send SIGKILL. A dead source is a death: the supervisor restarts it inside K and the successor rebuilds the issued list from complete `source: sent signal` lines. The next number is max+2. A number with no printed line is not in the summary. Times below are one run on QEMU TCG, not an R6 or R7 figure. The 1 s deadline stub and the 2000 ms pulse window were not changed.
+
+### make run-stop
+
+Command: `make run-stop`. The log file was created at 2026-11-23 19:41:44 +06 and last written at 19:42:19 +06. Exit code 0. Relay B pid 20668440 stayed alive after SIGSTOP (`kill -0`, and `pidin` showed thread 1 `STOPPED`). There is no `supervisor: restarted relay-b`. The `signal=9` lines are the shutdown SIGKILL after the run. Sink printed SAFE, then 11 late lines and no late line marked fresh, then RECOVERING on URGENT 18 (held, total 691287008 ns), then NORMAL on URGENT 24 (fresh, total 1815008 ns). Five signals that were still waiting in relay A at continue arrived on time and held, because their age was under 1 s: 17 (898238992 ns), 18, 19 (492668992 ns), 20 (283320000 ns), 21 (74364992 ns). No on-time line has a total above 1000000000 ns. Summary: URGENT received 20, on time 16, late 4, lost 0; COMMAND received 10, on time 7, late 3, lost 0; BACKGROUND received 10, on time 6, late 4, lost 0. `sink: unaccounted 0`.
+
+```text
+mkdir -p build
+docker exec qnx-build "/home/diana/Downloads/sample 4 projects/project-kit/build.sh"
+QNX_HOST=/home/diana/qnx800/host/linux/x86_64
+QNX_TARGET=/home/diana/qnx800/target/qnx
+MAKEFLAGS=-I/home/diana/qnx800/target/qnx/usr/include
+ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh stop'
+guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+scenario: stopping relay-b pid 20668440
+scenario: relay-b still alive pid 20668440
+     pid tid name                         prio STATE          Blocked                     
+20668440   1 tmp/relay                     30f STOPPED                                    
+20668440   2 tmp/relay                     10f CONDVAR        (0x42087295e8)              
+scenario: continuing relay-b pid 20668440
+--- supervisor (exit 0) ---
+supervisor: watching with COIDDEATH, K=3
+supervisor: node sink pid=20660247
+supervisor: node relay-b pid=20668440
+supervisor: node relay-a pid=20668441
+supervisor: node source pid=20668442
+supervisor: death pulse sink coid=1073741825
+supervisor: sink pulse pid=20660247 exit=0 signal=0
+supervisor: source wait pid=20668442 exit=0 signal=0
+supervisor: relay-b stop pid=20668440 exit=0 signal=9
+supervisor: relay-a stop pid=20668441 exit=0 signal=9
+--- source ---
+source: SCHED_FIFO ceiling 253, sending 20 URGENT, 10 COMMAND, 10 BACKGROUND to signal-relay-a
+source: sent signal 1 class BACKGROUND
+source: sent signal 2 class COMMAND
+source: sent signal 3 class URGENT
+source: sent signal 4 class BACKGROUND
+source: sent signal 5 class COMMAND
+source: sent signal 6 class URGENT
+source: sent signal 7 class BACKGROUND
+source: sent signal 8 class COMMAND
+source: sent signal 9 class URGENT
+source: sent signal 10 class BACKGROUND
+source: sent signal 11 class COMMAND
+source: sent signal 12 class URGENT
+source: sent signal 13 class BACKGROUND
+source: sent signal 14 class COMMAND
+source: sent signal 15 class URGENT
+source: sent signal 16 class BACKGROUND
+source: sent signal 17 class COMMAND
+source: sent signal 18 class URGENT
+source: sent signal 19 class BACKGROUND
+source: sent signal 20 class COMMAND
+source: sent signal 21 class URGENT
+source: sent signal 22 class BACKGROUND
+source: sent signal 23 class COMMAND
+source: sent signal 24 class URGENT
+source: sent signal 25 class BACKGROUND
+source: sent signal 26 class COMMAND
+source: sent signal 27 class URGENT
+source: sent signal 28 class BACKGROUND
+source: sent signal 29 class COMMAND
+source: sent signal 30 class URGENT
+source: sent signal 31 class URGENT
+source: sent signal 32 class URGENT
+source: sent signal 33 class URGENT
+source: sent signal 34 class URGENT
+source: sent signal 35 class URGENT
+source: sent signal 36 class URGENT
+source: sent signal 37 class URGENT
+source: sent signal 38 class URGENT
+source: sent signal 39 class URGENT
+source: sent signal 40 class URGENT
+source: sent manifest of 40 signals
+source: sent 40 signals
+--- relay A ---
+relay signal-relay-a: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none arrived 69188527512000 start 69188528746000 end 69188529131008 picked 69188528713008
+relay signal-relay-a: sent signal 2 class COMMAND; still waiting: none arrived 69188732726000 start 69188734200000 end 69188734587008 picked 69188734194000
+relay signal-relay-a: sent signal 3 class URGENT; still waiting: none arrived 69188939194000 start 69188941176000 end 69188941604000 picked 69188941165008
+relay signal-relay-a: sent signal 4 class BACKGROUND; still waiting: none arrived 69189146873008 start 69189148360000 end 69189148708000 picked 69189148355008
+relay signal-relay-a: sent signal 5 class COMMAND; still waiting: none arrived 69189352722000 start 69189353641008 end 69189353927008 picked 69189353637008
+relay signal-relay-a: sent signal 6 class URGENT; still waiting: none arrived 69189558226000 start 69189558762000 end 69192714920000 picked 69189558760000
+relay signal-relay-a: sent signal 9 class URGENT; still waiting: signal 7 BACKGROUND, signal 8 COMMAND, signal 10 BACKGROUND, signal 11 COMMAND, signal 12 URGENT, signal 13 BACKGROUND, signal 14 COMMAND, signal 15 URGENT, signal 16 BACKGROUND, signal 17 COMMAND, signal 18 URGENT, signal 19 BACKGROUND, signal 20 COMMAND, signal 21 URGENT arrived 69190174464000 start 69192716180000 end 69192716538000 picked 69192716178000
+relay signal-relay-a: sent signal 12 class URGENT; still waiting: signal 7 BACKGROUND, signal 8 COMMAND, signal 10 BACKGROUND, signal 11 COMMAND, signal 13 BACKGROUND, signal 14 COMMAND, signal 15 URGENT, signal 16 BACKGROUND, signal 17 COMMAND, signal 18 URGENT, signal 19 BACKGROUND, signal 20 COMMAND, signal 21 URGENT arrived 69190795189008 start 69192717199008 end 69192717820000 picked 69192717198000
+relay signal-relay-a: sent signal 15 class URGENT; still waiting: signal 7 BACKGROUND, signal 8 COMMAND, signal 10 BACKGROUND, signal 11 COMMAND, signal 13 BACKGROUND, signal 14 COMMAND, signal 16 BACKGROUND, signal 17 COMMAND, signal 18 URGENT, signal 19 BACKGROUND, signal 20 COMMAND, signal 21 URGENT arrived 69191416478000 start 69192718353008 end 69192718558000 picked 69192718352000
+relay signal-relay-a: sent signal 18 class URGENT; still waiting: signal 7 BACKGROUND, signal 8 COMMAND, signal 10 BACKGROUND, signal 11 COMMAND, signal 13 BACKGROUND, signal 14 COMMAND, signal 16 BACKGROUND, signal 17 COMMAND, signal 19 BACKGROUND, signal 20 COMMAND, signal 21 URGENT arrived 69192028712000 start 69192719034000 end 69192719594000 picked 69192719033008
+relay signal-relay-a: sent signal 21 class URGENT; still waiting: signal 7 BACKGROUND, signal 8 COMMAND, signal 10 BACKGROUND, signal 11 COMMAND, signal 13 BACKGROUND, signal 14 COMMAND, signal 16 BACKGROUND, signal 17 COMMAND, signal 19 BACKGROUND, signal 20 COMMAND arrived 69192646706000 start 69192720134000 end 69192720524000 picked 69192720132000
+relay signal-relay-a: sent signal 8 class COMMAND; still waiting: signal 7 BACKGROUND, signal 10 BACKGROUND, signal 11 COMMAND, signal 13 BACKGROUND, signal 14 COMMAND, signal 16 BACKGROUND, signal 17 COMMAND, signal 19 BACKGROUND, signal 20 COMMAND arrived 69189966005008 start 69192721293008 end 69192721409008 picked 69192721292000
+relay signal-relay-a: sent signal 11 class COMMAND; still waiting: signal 7 BACKGROUND, signal 10 BACKGROUND, signal 13 BACKGROUND, signal 14 COMMAND, signal 16 BACKGROUND, signal 17 COMMAND, signal 19 BACKGROUND, signal 20 COMMAND arrived 69190589760000 start 69192721879008 end 69192722452000 picked 69192721878000
+relay signal-relay-a: sent signal 14 class COMMAND; still waiting: signal 7 BACKGROUND, signal 10 BACKGROUND, signal 13 BACKGROUND, signal 16 BACKGROUND, signal 17 COMMAND, signal 19 BACKGROUND, signal 20 COMMAND arrived 69191210502000 start 69192722931008 end 69192723125008 picked 69192722930000
+relay signal-relay-a: sent signal 17 class COMMAND; still waiting: signal 7 BACKGROUND, signal 10 BACKGROUND, signal 13 BACKGROUND, signal 16 BACKGROUND, signal 19 BACKGROUND, signal 20 COMMAND arrived 69191826318000 start 69192723548000 end 69192723984000 picked 69192723547008
+relay signal-relay-a: sent signal 20 class COMMAND; still waiting: signal 7 BACKGROUND, signal 10 BACKGROUND, signal 13 BACKGROUND, signal 16 BACKGROUND, signal 19 BACKGROUND arrived 69192442323008 start 69192724573008 end 69192724751008 picked 69192724571008
+relay signal-relay-a: sent signal 7 class BACKGROUND; still waiting: signal 10 BACKGROUND, signal 13 BACKGROUND, signal 16 BACKGROUND, signal 19 BACKGROUND arrived 69189761297008 start 69192725467008 end 69192725576000 picked 69192725466000
+relay signal-relay-a: sent signal 10 class BACKGROUND; still waiting: signal 13 BACKGROUND, signal 16 BACKGROUND, signal 19 BACKGROUND arrived 69190383643008 start 69192725972000 end 69192726494000 picked 69192725971008
+relay signal-relay-a: sent signal 13 class BACKGROUND; still waiting: signal 16 BACKGROUND, signal 19 BACKGROUND arrived 69191002308000 start 69192726931008 end 69192727107008 picked 69192726930000
+relay signal-relay-a: sent signal 16 class BACKGROUND; still waiting: signal 19 BACKGROUND arrived 69191619537008 start 69192727494000 end 69192728039008 picked 69192727492000
+relay signal-relay-a: sent signal 19 class BACKGROUND; still waiting: none arrived 69192236515008 start 69192728468000 end 69192728633008 picked 69192728467008
+relay signal-relay-a: sent signal 22 class BACKGROUND; still waiting: none arrived 69192854866000 start 69192855680000 end 69192856044000 picked 69192855676000
+relay signal-relay-a: sent signal 23 class COMMAND; still waiting: none arrived 69193058028000 start 69193059766000 end 69193060235008 picked 69193059759008
+relay signal-relay-a: sent signal 24 class URGENT; still waiting: none arrived 69193266570000 start 69193267619008 end 69193267999008 picked 69193267614000
+relay signal-relay-a: sent signal 25 class BACKGROUND; still waiting: none arrived 69193470190000 start 69193471933008 end 69193472334000 picked 69193471926000
+relay signal-relay-a: sent signal 26 class COMMAND; still waiting: none arrived 69193676302000 start 69193677903008 end 69193678268000 picked 69193677896000
+relay signal-relay-a: sent signal 27 class URGENT; still waiting: none arrived 69193882036000 start 69193883330000 end 69193883698000 picked 69193883324000
+relay signal-relay-a: sent signal 28 class BACKGROUND; still waiting: none arrived 69194084921008 start 69194086091008 end 69194086430000 picked 69194086086000
+relay signal-relay-a: sent signal 29 class COMMAND; still waiting: none arrived 69194291909008 start 69194292490000 end 69194292715008 picked 69194292486000
+relay signal-relay-a: sent signal 30 class URGENT; still waiting: none arrived 69194499247008 start 69194501255008 end 69194501810000 picked 69194501247008
+relay signal-relay-a: sent signal 31 class URGENT; still waiting: none arrived 69194704514000 start 69194706377008 end 69194706812000 picked 69194706369008
+relay signal-relay-a: sent signal 32 class URGENT; still waiting: none arrived 69194909436000 start 69194910801008 end 69194911161008 picked 69194910795008
+relay signal-relay-a: sent signal 33 class URGENT; still waiting: none arrived 69195112630000 start 69195114600000 end 69195115222000 picked 69195114591008
+relay signal-relay-a: sent signal 34 class URGENT; still waiting: none arrived 69195317059008 start 69195317966000 end 69195318223008 picked 69195317962000
+relay signal-relay-a: sent signal 35 class URGENT; still waiting: none arrived 69195525887008 start 69195527300000 end 69195527718000 picked 69195527292000
+relay signal-relay-a: sent signal 36 class URGENT; still waiting: none arrived 69195732359008 start 69195733617008 end 69195734024000 picked 69195733610000
+relay signal-relay-a: sent signal 37 class URGENT; still waiting: none arrived 69195940113008 start 69195941975008 end 69195942483008 picked 69195941967008
+relay signal-relay-a: sent signal 38 class URGENT; still waiting: none arrived 69196143592000 start 69196144852000 end 69196145202000 picked 69196144846000
+relay signal-relay-a: sent signal 39 class URGENT; still waiting: none arrived 69196347594000 start 69196348981008 end 69196349441008 picked 69196348973008
+relay signal-relay-a: sent signal 40 class URGENT; still waiting: none arrived 69196555017008 start 69196556450000 end 69196557351008 picked 69196556443008
+relay signal-relay-a: forwarded manifest of 40 signals
+--- relay B ---
+relay signal-relay-b: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-b: sent signal 1 class BACKGROUND; still waiting: none arrived 69188528806000 start 69188529243008 end 69188530144000 picked 69188529241008
+relay signal-relay-b: sent signal 2 class COMMAND; still waiting: none arrived 69188734300000 start 69188734699008 end 69188735952000 picked 69188734697008
+relay signal-relay-b: sent signal 3 class URGENT; still waiting: none arrived 69188941282000 start 69188941878000 end 69188943569008 picked 69188941874000
+relay signal-relay-b: sent signal 4 class BACKGROUND; still waiting: none arrived 69189148453008 start 69189148811008 end 69189149589008 picked 69189148808000
+relay signal-relay-b: sent signal 5 class COMMAND; still waiting: none arrived 69189353715008 start 69189354028000 end 69189354618000 picked 69189354026000
+relay signal-relay-b: sent signal 6 class URGENT; still waiting: none arrived 69192714807008 start 69192715344000 end 69192716225008 picked 69192715341008
+relay signal-relay-b: sent signal 9 class URGENT; still waiting: none arrived 69192716473008 start 69192717251008 end 69192717555008 picked 69192717250000
+relay signal-relay-b: sent signal 12 class URGENT; still waiting: none arrived 69192717522000 start 69192718051008 end 69192718385008 picked 69192718050000
+relay signal-relay-b: sent signal 15 class URGENT; still waiting: none arrived 69192718514000 start 69192719081008 end 69192719355008 picked 69192719080000
+relay signal-relay-b: sent signal 18 class URGENT; still waiting: none arrived 69192719326000 start 69192719819008 end 69192720165008 picked 69192719817008
+relay signal-relay-b: sent signal 21 class URGENT; still waiting: none arrived 69192720476000 start 69192720748000 end 69192720987008 picked 69192720747008
+relay signal-relay-b: sent signal 8 class COMMAND; still waiting: none arrived 69192721366000 start 69192721926000 end 69192722219008 picked 69192721925008
+relay signal-relay-b: sent signal 11 class COMMAND; still waiting: none arrived 69192722191008 start 69192722664000 end 69192722960000 picked 69192722663008
+relay signal-relay-b: sent signal 14 class COMMAND; still waiting: none arrived 69192723081008 start 69192723590000 end 69192723836000 picked 69192723589008
+relay signal-relay-b: sent signal 17 class COMMAND; still waiting: none arrived 69192723809008 start 69192724319008 end 69192724601008 picked 69192724318000
+relay signal-relay-b: sent signal 20 class COMMAND; still waiting: none arrived 69192724713008 start 69192724974000 end 69192725186000 picked 69192724973008
+relay signal-relay-b: sent signal 7 class BACKGROUND; still waiting: none arrived 69192725538000 start 69192726014000 end 69192726277008 picked 69192726013008
+relay signal-relay-b: sent signal 10 class BACKGROUND; still waiting: none arrived 69192726250000 start 69192726696000 end 69192726959008 picked 69192726694000
+relay signal-relay-b: sent signal 13 class BACKGROUND; still waiting: none arrived 69192727070000 start 69192727535008 end 69192727779008 picked 69192727534000
+relay signal-relay-b: sent signal 16 class BACKGROUND; still waiting: none arrived 69192727754000 start 69192728238000 end 69192728496000 picked 69192728237008
+relay signal-relay-b: sent signal 19 class BACKGROUND; still waiting: none arrived 69192728599008 start 69192728833008 end 69192729027008 picked 69192728832000
+relay signal-relay-b: sent signal 22 class BACKGROUND; still waiting: none arrived 69192855768000 start 69192856175008 end 69192856807008 picked 69192856172000
+relay signal-relay-b: sent signal 23 class COMMAND; still waiting: none arrived 69193059873008 start 69193060372000 end 69193061202000 picked 69193060368000
+relay signal-relay-b: sent signal 24 class URGENT; still waiting: none arrived 69193267714000 start 69193268136000 end 69193269598000 picked 69193268132000
+relay signal-relay-b: sent signal 25 class BACKGROUND; still waiting: none arrived 69193472037008 start 69193472464000 end 69193473321008 picked 69193472461008
+relay signal-relay-b: sent signal 26 class COMMAND; still waiting: none arrived 69193677989008 start 69193678373008 end 69193679065008 picked 69193678371008
+relay signal-relay-b: sent signal 27 class URGENT; still waiting: none arrived 69193883420000 start 69193883818000 end 69193884676000 picked 69193883815008
+relay signal-relay-b: sent signal 28 class BACKGROUND; still waiting: none arrived 69194086172000 start 69194086535008 end 69194087295008 picked 69194086532000
+relay signal-relay-b: sent signal 29 class COMMAND; still waiting: none arrived 69194292572000 start 69194292819008 end 69194293598000 picked 69194292817008
+relay signal-relay-b: sent signal 30 class URGENT; still waiting: none arrived 69194501393008 start 69194502362000 end 69194504181008 picked 69194502356000
+relay signal-relay-b: sent signal 31 class URGENT; still waiting: none arrived 69194706486000 start 69194706940000 end 69194711271008 picked 69194706937008
+relay signal-relay-b: sent signal 32 class URGENT; still waiting: none arrived 69194910890000 start 69194911266000 end 69194911920000 picked 69194911264000
+relay signal-relay-b: sent signal 33 class URGENT; still waiting: none arrived 69195114727008 start 69195115633008 end 69195116750000 picked 69195115627008
+relay signal-relay-b: sent signal 34 class URGENT; still waiting: none arrived 69195318030000 start 69195318312000 end 69195318779008 picked 69195318310000
+relay signal-relay-b: sent signal 35 class URGENT; still waiting: none arrived 69195527410000 start 69195527822000 end 69195528273008 picked 69195527820000
+relay signal-relay-b: sent signal 36 class URGENT; still waiting: none arrived 69195733714000 start 69195734152000 end 69195735000000 picked 69195734149008
+relay signal-relay-b: sent signal 37 class URGENT; still waiting: none arrived 69195942088000 start 69195942593008 end 69195943080000 picked 69195942591008
+relay signal-relay-b: sent signal 38 class URGENT; still waiting: none arrived 69196144944000 start 69196145313008 end 69196145941008 picked 69196145311008
+relay signal-relay-b: sent signal 39 class URGENT; still waiting: none arrived 69196349084000 start 69196349581008 end 69196350331008 picked 69196349577008
+relay signal-relay-b: sent signal 40 class URGENT; still waiting: none arrived 69196556582000 start 69196557675008 end 69196560582000 picked 69196557669008
+relay signal-relay-b: forwarded manifest of 40 signals
+relay signal-relay-b: link down signal-sink coid 1073741826
+--- sink ---
+sink: state INIT
+sink: signal 1 class BACKGROUND on time, held, hops 306000 ns, 1294000 ns, 566000 ns, total 2166000 ns
+sink: signal 2 class COMMAND on time, held, hops 236000 ns, 1574000 ns, 516000 ns, total 2326000 ns
+sink: signal 3 class URGENT on time, fresh, hops 290000 ns, 2088000 ns, 803008 ns, total 3181008 ns
+sink: state NORMAL
+sink: signal 4 class BACKGROUND on time, fresh, hops 267008 ns, 1580000 ns, 458992 ns, total 2306000 ns
+sink: signal 5 class COMMAND on time, fresh, hops 150000 ns, 993008 ns, 392992 ns, total 1536000 ns
+sink: state SAFE
+sink: signal 6 class URGENT late, hops 72000 ns, 3156581008 ns, 582992 ns, total 3157236000 ns
+sink: signal 9 class URGENT late, hops 330992 ns, 2542009008 ns, 816992 ns, total 2543156992 ns
+sink: signal 12 class URGENT late, hops 215008 ns, 1922332992 ns, 564000 ns, total 1923112000 ns
+sink: signal 15 class URGENT late, hops 236000 ns, 1302036000 ns, 602000 ns, total 1302874000 ns
+sink: signal 18 class URGENT on time, held, hops 146000 ns, 690614000 ns, 527008 ns, total 691287008 ns
+sink: state RECOVERING
+sink: signal 21 class URGENT on time, held, hops 290992 ns, 73770000 ns, 304000 ns, total 74364992 ns
+sink: signal 8 class COMMAND late, hops 292000 ns, 2755360992 ns, 592000 ns, total 2756244992 ns
+sink: signal 11 class COMMAND late, hops 68992 ns, 2132431008 ns, 508992 ns, total 2133008992 ns
+sink: signal 14 class COMMAND late, hops 216000 ns, 1512579008 ns, 540000 ns, total 1513335008 ns
+sink: signal 17 class COMMAND on time, held, hops 206992 ns, 897491008 ns, 540992 ns, total 898238992 ns
+sink: signal 20 class COMMAND on time, held, hops 638000 ns, 282390000 ns, 292000 ns, total 283320000 ns
+sink: signal 7 class BACKGROUND late, hops 214000 ns, 2964240992 ns, 507008 ns, total 2964962000 ns
+sink: signal 10 class BACKGROUND late, hops 250000 ns, 2342606992 ns, 477008 ns, total 2343334000 ns
+sink: signal 13 class BACKGROUND late, hops 290000 ns, 1724762000 ns, 496000 ns, total 1725548000 ns
+sink: signal 16 class BACKGROUND late, hops 87008 ns, 1108216992 ns, 515008 ns, total 1108819008 ns
+sink: signal 19 class BACKGROUND on time, held, hops 322000 ns, 492084000 ns, 262992 ns, total 492668992 ns
+sink: signal 22 class BACKGROUND on time, held, hops 134992 ns, 902000 ns, 508000 ns, total 1544992 ns
+sink: signal 23 class COMMAND on time, held, hops 490000 ns, 1845008 ns, 610992 ns, total 2946000 ns
+sink: signal 24 class URGENT on time, fresh, hops 144000 ns, 1144000 ns, 527008 ns, total 1815008 ns
+sink: state NORMAL
+sink: signal 25 class BACKGROUND on time, fresh, hops 262000 ns, 1847008 ns, 552992 ns, total 2662000 ns
+sink: signal 26 class COMMAND on time, fresh, hops 676000 ns, 1687008 ns, 474992 ns, total 2838000 ns
+sink: signal 27 class URGENT on time, fresh, hops 222000 ns, 1384000 ns, 496000 ns, total 2102000 ns
+sink: signal 28 class BACKGROUND on time, fresh, hops 186000 ns, 1250992 ns, 464000 ns, total 1900992 ns
+sink: signal 29 class COMMAND on time, fresh, hops 151008 ns, 662992 ns, 428000 ns, total 1242000 ns
+sink: signal 30 class URGENT on time, fresh, hops 308000 ns, 2146000 ns, 1186992 ns, total 3640992 ns
+sink: signal 31 class URGENT on time, fresh, hops 254000 ns, 1972000 ns, 588000 ns, total 2814000 ns
+sink: signal 32 class URGENT on time, fresh, hops 222992 ns, 1454000 ns, 463008 ns, total 2140000 ns
+sink: signal 33 class URGENT on time, fresh, hops 294000 ns, 2097008 ns, 1500000 ns, total 3891008 ns
+sink: signal 34 class URGENT on time, fresh, hops 130000 ns, 970992 ns, 355008 ns, total 1456000 ns
+sink: signal 35 class URGENT on time, fresh, hops 423008 ns, 1522992 ns, 497008 ns, total 2443008 ns
+sink: signal 36 class URGENT on time, fresh, hops 267008 ns, 1354992 ns, 555008 ns, total 2177008 ns
+sink: signal 37 class URGENT on time, fresh, hops 273008 ns, 1974992 ns, 604000 ns, total 2852000 ns
+sink: signal 38 class URGENT on time, fresh, hops 252992 ns, 1352000 ns, 473008 ns, total 2078000 ns
+sink: signal 39 class URGENT on time, fresh, hops 196992 ns, 1490000 ns, 631008 ns, total 2318000 ns
+sink: signal 40 class URGENT on time, fresh, hops 243008 ns, 1564992 ns, 1389008 ns, total 3197008 ns
+sink: summary URGENT received 20, on time 16, late 4, lost 0, dropped 0
+sink: summary COMMAND received 10, on time 7, late 3, lost 0, dropped 0
+sink: summary BACKGROUND received 10, on time 6, late 4, lost 0, dropped 0
+sink: unaccounted 0
+```
+
+### make run-source
+
+Command: `make run-source`. The log file was created at 2026-11-23 19:45:48 +06 and last written at 19:46:04 +06. Exit code 0. Source pid 21102618 was killed with signal 9 after it had printed signals 1 through 5. The supervisor printed `source issued list 5, next 7` and `restarted source`. Signal 6 has no printed line and does not appear at the sink. Sink printed SAFE, then RECOVERING, then NORMAL. The rebuilt sentence is present. Summary: URGENT received 13, on time 13, late 0, lost 0; COMMAND received 8, on time 8, late 0, lost 0; BACKGROUND received 8, on time 8, late 0, lost 0. `sink: unaccounted 0`.
+
+```text
+mkdir -p build
+docker exec qnx-build "/home/diana/Downloads/sample 4 projects/project-kit/build.sh"
+QNX_HOST=/home/diana/qnx800/host/linux/x86_64
+QNX_TARGET=/home/diana/qnx800/target/qnx
+MAKEFLAGS=-I/home/diana/qnx800/target/qnx/usr/include
+ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
+scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./build/source ./build/sink ./build/relay ./build/supervisor root@localhost:/tmp/
+scp -P 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+ssh -p 2222 -i /Users/diana/.ssh/id_ed25519 -o BatchMode=yes root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh source'
+guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+scenario: killing source pid 21102618
+--- supervisor (exit 0) ---
+supervisor: watching with COIDDEATH, K=3
+supervisor: node sink pid=21094423
+supervisor: node relay-b pid=21102616
+supervisor: node relay-a pid=21102617
+supervisor: node source pid=21102618
+supervisor: source wait pid=21102618 exit=0 signal=9
+supervisor: source streak=1 limit=3
+supervisor: source issued list 5, next 7
+supervisor: holding restart of source for 2500 ms
+supervisor: restarted source pid=21168150
+supervisor: death pulse sink coid=1073741825
+supervisor: sink pulse pid=21094423 exit=0 signal=0
+supervisor: source progress, streak cleared
+supervisor: source wait pid=21168150 exit=0 signal=0
+supervisor: relay-b stop pid=21102616 exit=0 signal=9
+supervisor: relay-a stop pid=21102617 exit=0 signal=9
+--- source ---
+source: SCHED_FIFO ceiling 253, sending 12 URGENT, 6 COMMAND, 6 BACKGROUND to signal-relay-a
+source: sent signal 1 class BACKGROUND
+source: sent signal 2 class COMMAND
+source: sent signal 3 class URGENT
+source: sent signal 4 class BACKGROUND
+source: sent signal 5 class COMMAND
+source: SCHED_FIFO ceiling 253, sending 12 URGENT, 6 COMMAND, 6 BACKGROUND to signal-relay-a
+source: sent signal 7 class BACKGROUND
+source: sent signal 8 class COMMAND
+source: sent signal 9 class URGENT
+source: sent signal 10 class BACKGROUND
+source: sent signal 11 class COMMAND
+source: sent signal 12 class URGENT
+source: sent signal 13 class BACKGROUND
+source: sent signal 14 class COMMAND
+source: sent signal 15 class URGENT
+source: sent signal 16 class BACKGROUND
+source: sent signal 17 class COMMAND
+source: sent signal 18 class URGENT
+source: sent signal 19 class BACKGROUND
+source: sent signal 20 class COMMAND
+source: sent signal 21 class URGENT
+source: sent signal 22 class BACKGROUND
+source: sent signal 23 class COMMAND
+source: sent signal 24 class URGENT
+source: sent signal 25 class URGENT
+source: sent signal 26 class URGENT
+source: sent signal 27 class URGENT
+source: sent signal 28 class URGENT
+source: sent signal 29 class URGENT
+source: sent signal 30 class URGENT
+source: sent manifest of 29 signals
+source: sent 24 signals
+--- relay A ---
+relay signal-relay-a: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-a: sent signal 1 class BACKGROUND; still waiting: none arrived 69412998135008 start 69412999368000 end 69412999678000 picked 69412999335008
+relay signal-relay-a: sent signal 2 class COMMAND; still waiting: none arrived 69413201927008 start 69413202943008 end 69413203272000 picked 69413202937008
+relay signal-relay-a: sent signal 3 class URGENT; still waiting: none arrived 69413405698000 start 69413408344000 end 69413408810000 picked 69413408335008
+relay signal-relay-a: sent signal 4 class BACKGROUND; still waiting: none arrived 69413610291008 start 69413611281008 end 69413611591008 picked 69413611276000
+relay signal-relay-a: sent signal 5 class COMMAND; still waiting: none arrived 69413813503008 start 69413814454000 end 69413814796000 picked 69413814447008
+relay signal-relay-a: sent signal 7 class BACKGROUND; still waiting: none arrived 69416781177008 start 69416783022000 end 69416783683008 picked 69416783014000
+relay signal-relay-a: sent signal 8 class COMMAND; still waiting: none arrived 69416986173008 start 69416988222000 end 69416988706000 picked 69416988214000
+relay signal-relay-a: sent signal 9 class URGENT; still waiting: none arrived 69417194108000 start 69417195330000 end 69417195655008 picked 69417195323008
+relay signal-relay-a: sent signal 10 class BACKGROUND; still waiting: none arrived 69417401257008 start 69417403682000 end 69417404203008 picked 69417403673008
+relay signal-relay-a: sent signal 11 class COMMAND; still waiting: none arrived 69417608521008 start 69417610472000 end 69417610896000 picked 69417610466000
+relay signal-relay-a: sent signal 12 class URGENT; still waiting: none arrived 69417816273008 start 69417817389008 end 69417817783008 picked 69417817384000
+relay signal-relay-a: sent signal 13 class BACKGROUND; still waiting: none arrived 69418021787008 start 69418024921008 end 69418025357008 picked 69418024912000
+relay signal-relay-a: sent signal 14 class COMMAND; still waiting: none arrived 69418228379008 start 69418230496000 end 69418231006000 picked 69418230489008
+relay signal-relay-a: sent signal 15 class URGENT; still waiting: none arrived 69418433991008 start 69418436505008 end 69418437218000 picked 69418436494000
+relay signal-relay-a: sent signal 16 class BACKGROUND; still waiting: none arrived 69418642219008 start 69418644101008 end 69418644524000 picked 69418644094000
+relay signal-relay-a: sent signal 17 class COMMAND; still waiting: none arrived 69418851567008 start 69418853297008 end 69418853728000 picked 69418853291008
+relay signal-relay-a: sent signal 18 class URGENT; still waiting: none arrived 69419058280000 start 69419059821008 end 69419060450000 picked 69419059814000
+relay signal-relay-a: sent signal 19 class BACKGROUND; still waiting: none arrived 69419266924000 start 69419268877008 end 69419269424000 picked 69419268869008
+relay signal-relay-a: sent signal 20 class COMMAND; still waiting: none arrived 69419471461008 start 69419473946000 end 69419474718000 picked 69419473936000
+relay signal-relay-a: sent signal 21 class URGENT; still waiting: none arrived 69419680814000 start 69419682681008 end 69419683190000 picked 69419682672000
+relay signal-relay-a: sent signal 22 class BACKGROUND; still waiting: none arrived 69419888613008 start 69419889716000 end 69419890024000 picked 69419889712000
+relay signal-relay-a: sent signal 23 class COMMAND; still waiting: none arrived 69420092384000 start 69420093969008 end 69420094374000 picked 69420093960000
+relay signal-relay-a: sent signal 24 class URGENT; still waiting: none arrived 69420297995008 start 69420299898000 end 69420300419008 picked 69420299890000
+relay signal-relay-a: sent signal 25 class URGENT; still waiting: none arrived 69420506193008 start 69420510094000 end 69420510684000 picked 69420510081008
+relay signal-relay-a: sent signal 26 class URGENT; still waiting: none arrived 69420717876000 start 69420719263008 end 69420719672000 picked 69420719257008
+relay signal-relay-a: sent signal 27 class URGENT; still waiting: none arrived 69420925625008 start 69420926922000 end 69420927641008 picked 69420926915008
+relay signal-relay-a: sent signal 28 class URGENT; still waiting: none arrived 69421132862000 start 69421135250000 end 69421135947008 picked 69421135239008
+relay signal-relay-a: sent signal 29 class URGENT; still waiting: none arrived 69421343108000 start 69421345225008 end 69421345696000 picked 69421345218000
+relay signal-relay-a: sent signal 30 class URGENT; still waiting: none arrived 69421550409008 start 69421552722000 end 69421553085008 picked 69421552713008
+relay signal-relay-a: forwarded manifest of 29 signals
+--- relay B ---
+relay signal-relay-b: SCHED_FIFO ceiling 253, own 10, BACKGROUND 12, COMMAND 20, URGENT 30
+relay signal-relay-b: sent signal 1 class BACKGROUND; still waiting: none arrived 69412999424000 start 69412999782000 end 69413000649008 picked 69412999781008
+relay signal-relay-b: sent signal 2 class COMMAND; still waiting: none arrived 69413203060000 start 69413203438000 end 69413205168000 picked 69413203434000
+relay signal-relay-b: sent signal 3 class URGENT; still waiting: none arrived 69413408444000 start 69413409102000 end 69413409812000 picked 69413409100000
+relay signal-relay-b: sent signal 4 class BACKGROUND; still waiting: none arrived 69413611358000 start 69413611700000 end 69413612264000 picked 69413611697008
+relay signal-relay-b: sent signal 5 class COMMAND; still waiting: none arrived 69413814580000 start 69413814962000 end 69413816105008 picked 69413814958000
+relay signal-relay-b: sent signal 7 class BACKGROUND; still waiting: none arrived 69416783199008 start 69416783814000 end 69416784865008 picked 69416783811008
+relay signal-relay-b: sent signal 8 class COMMAND; still waiting: none arrived 69416988337008 start 69416988902000 end 69416990039008 picked 69416988898000
+relay signal-relay-b: sent signal 9 class URGENT; still waiting: none arrived 69417195452000 start 69417195817008 end 69417196894000 picked 69417195813008
+relay signal-relay-b: sent signal 10 class BACKGROUND; still waiting: none arrived 69417403870000 start 69417404316000 end 69417405019008 picked 69417404314000
+relay signal-relay-b: sent signal 11 class COMMAND; still waiting: none arrived 69417610590000 start 69417611032000 end 69417611921008 picked 69417611029008
+relay signal-relay-b: sent signal 12 class URGENT; still waiting: none arrived 69417817483008 start 69417817920000 end 69417818995008 picked 69417817917008
+relay signal-relay-b: sent signal 13 class BACKGROUND; still waiting: none arrived 69418025020000 start 69418025464000 end 69418026345008 picked 69418025461008
+relay signal-relay-b: sent signal 14 class COMMAND; still waiting: none arrived 69418230624000 start 69418231168000 end 69418232027008 picked 69418231164000
+relay signal-relay-b: sent signal 15 class URGENT; still waiting: none arrived 69418436672000 start 69418437475008 end 69418439338000 picked 69418437469008
+relay signal-relay-b: sent signal 16 class BACKGROUND; still waiting: none arrived 69418644218000 start 69418644656000 end 69418645431008 picked 69418644653008
+relay signal-relay-b: sent signal 17 class COMMAND; still waiting: none arrived 69418853405008 start 69418853857008 end 69418854451008 picked 69418853854000
+relay signal-relay-b: sent signal 18 class URGENT; still waiting: none arrived 69419059959008 start 69419060615008 end 69419061781008 picked 69419060611008
+relay signal-relay-b: sent signal 19 class BACKGROUND; still waiting: none arrived 69419269006000 start 69419269599008 end 69419270622000 picked 69419269595008
+relay signal-relay-b: sent signal 20 class COMMAND; still waiting: none arrived 69419474093008 start 69419475062000 end 69419476649008 picked 69419475057008
+relay signal-relay-b: sent signal 21 class URGENT; still waiting: none arrived 69419682807008 start 69419683348000 end 69419685051008 picked 69419683344000
+relay signal-relay-b: sent signal 22 class BACKGROUND; still waiting: none arrived 69419889791008 start 69419890130000 end 69419890615008 picked 69419890127008
+relay signal-relay-b: sent signal 23 class COMMAND; still waiting: none arrived 69420094077008 start 69420094518000 end 69420095349008 picked 69420094515008
+relay signal-relay-b: sent signal 24 class URGENT; still waiting: none arrived 69420300025008 start 69420300582000 end 69420301786000 picked 69420300578000
+relay signal-relay-b: sent signal 25 class URGENT; still waiting: none arrived 69420510242000 start 69420510847008 end 69420512408000 picked 69420510843008
+relay signal-relay-b: sent signal 26 class URGENT; still waiting: none arrived 69420719365008 start 69420719797008 end 69420720584000 picked 69420719794000
+relay signal-relay-b: sent signal 27 class URGENT; still waiting: none arrived 69420927023008 start 69420927836000 end 69420928449008 picked 69420927832000
+relay signal-relay-b: sent signal 28 class URGENT; still waiting: none arrived 69421135428000 start 69421136165008 end 69421137682000 picked 69421136160000
+relay signal-relay-b: sent signal 29 class URGENT; still waiting: none arrived 69421345346000 start 69421345903008 end 69421346960000 picked 69421345899008
+relay signal-relay-b: sent signal 30 class URGENT; still waiting: none arrived 69421552844000 start 69421553248000 end 69421554155008 picked 69421553244000
+relay signal-relay-b: forwarded manifest of 29 signals
+relay signal-relay-b: link down signal-sink coid 1073741826
+--- sink ---
+sink: state INIT
+sink: signal 1 class BACKGROUND on time, held, hops 297008 ns, 1288992 ns, 476000 ns, total 2062000 ns
+sink: signal 2 class COMMAND on time, held, hops 484000 ns, 1132992 ns, 564000 ns, total 2180992 ns
+sink: signal 3 class URGENT on time, fresh, hops 218000 ns, 2746000 ns, 758000 ns, total 3722000 ns
+sink: state NORMAL
+sink: signal 4 class BACKGROUND on time, fresh, hops 129008 ns, 1066992 ns, 433008 ns, total 1629008 ns
+sink: signal 5 class COMMAND on time, fresh, hops 221008 ns, 1076992 ns, 543008 ns, total 1841008 ns
+sink: state SAFE
+sink: signal 7 class BACKGROUND on time, held, hops 419008 ns, 2022000 ns, 756992 ns, total 3198000 ns
+sink: signal 8 class COMMAND on time, held, hops 362000 ns, 2164000 ns, 772000 ns, total 3298000 ns
+sink: signal 9 class URGENT on time, held, hops 386000 ns, 1344000 ns, 523008 ns, total 2253008 ns
+sink: state RECOVERING
+sink: signal 10 class BACKGROUND on time, held, hops 526000 ns, 2612992 ns, 563008 ns, total 3702000 ns
+sink: signal 11 class COMMAND on time, held, hops 279008 ns, 2068992 ns, 615008 ns, total 2963008 ns
+sink: signal 12 class URGENT on time, held, hops 149008 ns, 1210000 ns, 598992 ns, total 1958000 ns
+sink: signal 13 class BACKGROUND on time, held, hops 242000 ns, 3232992 ns, 598000 ns, total 4072992 ns
+sink: signal 14 class COMMAND on time, held, hops 310000 ns, 2244992 ns, 693008 ns, total 3248000 ns
+sink: signal 15 class URGENT on time, fresh, hops 376000 ns, 2680992 ns, 1042000 ns, total 4098992 ns
+sink: state NORMAL
+sink: signal 16 class BACKGROUND on time, fresh, hops 272000 ns, 1998992 ns, 590000 ns, total 2860992 ns
+sink: signal 17 class COMMAND on time, fresh, hops 271008 ns, 1838000 ns, 588992 ns, total 2698000 ns
+sink: signal 18 class URGENT on time, fresh, hops 346000 ns, 1679008 ns, 828992 ns, total 2854000 ns
+sink: signal 19 class BACKGROUND on time, fresh, hops 294992 ns, 2082000 ns, 753008 ns, total 3130000 ns
+sink: signal 20 class COMMAND on time, fresh, hops 348000 ns, 2632000 ns, 1242992 ns, total 4222992 ns
+sink: signal 21 class URGENT on time, fresh, hops 308992 ns, 1993008 ns, 684992 ns, total 2986992 ns
+sink: signal 22 class BACKGROUND on time, fresh, hops 151008 ns, 1178000 ns, 428992 ns, total 1758000 ns
+sink: signal 23 class COMMAND on time, fresh, hops 218000 ns, 1693008 ns, 590000 ns, total 2501008 ns
+sink: signal 24 class URGENT on time, fresh, hops 316000 ns, 2030000 ns, 704992 ns, total 3050992 ns
+sink: signal 25 class URGENT on time, fresh, hops 561008 ns, 4048992 ns, 757008 ns, total 5367008 ns
+sink: signal 26 class URGENT on time, fresh, hops 312992 ns, 1489008 ns, 540000 ns, total 2342000 ns
+sink: signal 27 class URGENT on time, fresh, hops 194000 ns, 1398000 ns, 984000 ns, total 2576000 ns
+sink: signal 28 class URGENT on time, fresh, hops 402000 ns, 2566000 ns, 966000 ns, total 3934000 ns
+sink: signal 29 class URGENT on time, fresh, hops 376992 ns, 2238000 ns, 801008 ns, total 3416000 ns
+sink: signal 30 class URGENT on time, fresh, hops 321008 ns, 2434992 ns, 546000 ns, total 3302000 ns
+sink: an earlier source died before its issued list arrived; this list was rebuilt from the lines that source printed, and a signal with no printed line is not in this summary
+sink: summary URGENT received 13, on time 13, late 0, lost 0, dropped 0
+sink: summary COMMAND received 8, on time 8, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 8, on time 8, late 0, lost 0, dropped 0
+sink: unaccounted 0
+```
+
+### R8, this batch only
+
+Each cell is from the run that wrote the log named in the row. Lost, late, and unaccounted are the sink summary, summed across URGENT, COMMAND, and BACKGROUND.
+
+| Failure | Reached SAFE | Network after | lost | late | unaccounted |
+| --- | --- | --- | ---: | ---: | ---: |
+| Kill relay B. `make run-kill`, log mtime 2026-11-23 19:48:25 +06, exit 0 | yes, `sink: state SAFE` | NORMAL. `supervisor: restarted relay-b` | 13 (signals 6–18) | 0 | 0 |
+| Stop relay B. `make run-stop`, 19:41:44–19:42:19 +06, exit 0 | yes | NORMAL. No restart of relay B | 0 | 11 | 0 |
+| Kill source. `make run-source`, 19:45:48–19:46:04 +06, exit 0 | yes | NORMAL. `supervisor: restarted source`. Signal 6 was not printed and is not in the summary | 0 | 0 | 0 |
+| K crashes in a row. `make run-lock`, log mtime 2026-11-23 19:48:36 +06, exit 0 | yes | LOCKED_SAFE. One restart, then lock. Sink printed that the manifest did not arrive | 0 | 0 | 0 |
+
+The same evening, after these changes, `make run` (log mtime 19:48:06 +06) and `make run-flood` (19:48:13 +06) also exited 0. Calm: 9 signals on time, lost 0, late 0, `unaccounted 0`. Flood: dropped signals 38 and 45, both BACKGROUND; URGENT on time 3; COMMAND on time 3; BACKGROUND received 38, dropped 2; `unaccounted 0`.
