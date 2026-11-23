@@ -3,6 +3,8 @@
 #include "issued_log.h"
 #include "node_fault.h"
 #include "restart_limit.h"
+#include "telemetry_pub.h"
+#include "telemetry_snap.h"
 #include "wire.h"
 
 #include <errno.h>
@@ -56,6 +58,11 @@ static unsigned long gap_ms;
 static unsigned long window_ms = 1000;
 static uint64_t source_next = 1;
 static int source_restart;
+static int live_source;
+static pid_t telem_pid;
+static int telem_starts;
+static int telem_restart_due;
+static int64_t telem_restart_at;
 
 static int64_t monotonic_ns(void)
 {
@@ -162,8 +169,12 @@ static int start_node(enum role role, int restarted)
 
     switch (role) {
     case ROLE_SINK:
-        snprintf(count_buf, sizeof count_buf, "%lu",
-                 urgent_count + command_count + background_count);
+        if (live_source) {
+            snprintf(count_buf, sizeof count_buf, "%d", SIGNAL_MANIFEST_CAP);
+        } else {
+            snprintf(count_buf, sizeof count_buf, "%lu",
+                     urgent_count + command_count + background_count);
+        }
         snprintf(window_buf, sizeof window_buf, "%lu", window_ms);
         path = "/tmp/sink";
         argv[0] = path;
@@ -188,6 +199,14 @@ static int start_node(enum role role, int restarted)
     case ROLE_SOURCE: {
         int n = 0;
 
+        if (live_source) {
+            path = "/tmp/source";
+            argv[0] = path;
+            argv[1] = "live";
+            argv[2] = "signal-relay-a";
+            argv[3] = NULL;
+            break;
+        }
         snprintf(urgent_buf, sizeof urgent_buf, "%lu", urgent_count);
         snprintf(command_buf, sizeof command_buf, "%lu", command_count);
         snprintf(background_buf, sizeof background_buf, "%lu", background_count);
@@ -248,6 +267,9 @@ static void kill_all(void)
         if (nodes[i].pid > 0) {
             kill(nodes[i].pid, SIGKILL);
         }
+    }
+    if (telem_pid > 0) {
+        kill(telem_pid, SIGKILL);
     }
 }
 
@@ -401,7 +423,7 @@ static int handle_status(enum role role, int status, const char *how)
     printf("supervisor: %s streak=%d limit=%d\n",
            node->role, node->limit.streak, node->limit.limit);
     fflush(stdout);
-    if (role == ROLE_SOURCE) {
+    if (role == ROLE_SOURCE && !live_source) {
         if (snapshot_source(&source_next) != 0) {
             fprintf(stderr, "supervisor: could not keep the source issued list\n");
             return -1;
@@ -490,10 +512,85 @@ static void note_progress(int64_t now_ns)
     }
 }
 
+static int start_telemetry(int restarted)
+{
+    char *path = "/tmp/telemetry";
+    char *argv[] = {"/tmp/telemetry", NULL};
+    pid_t pid = spawn_logged(path, argv, "/tmp/telemetry.out", telem_starts == 0);
+
+    if (pid < 0) {
+        return -1;
+    }
+    telem_pid = pid;
+    telem_starts++;
+    printf("supervisor: %s telemetry pid=%d\n",
+           restarted ? "restarted" : "node", (int)pid);
+    fflush(stdout);
+    return 0;
+}
+
+static void publish_nodes(void)
+{
+    struct telem_node report[TELEM_NODES];
+    char buf[TELEM_REPORT_CAP];
+    static const enum role order[TELEM_NODES] = {
+        ROLE_SOURCE, ROLE_RELAY_A, ROLE_RELAY_B, ROLE_SINK
+    };
+    int i;
+    int n;
+
+    for (i = 0; i < TELEM_NODES; i++) {
+        struct watched *node = &nodes[order[i]];
+
+        report[i].alive = node->pid > 0 ? 1 : 0;
+        report[i].restarts =
+            node->starts > 0 ? (uint32_t)(node->starts - 1) : 0;
+    }
+    n = telem_report_nodes(buf, sizeof buf, report);
+    if (n > 0) {
+        telem_send_nb(buf, (size_t)n);
+    }
+}
+
+static void reap_telemetry(int block)
+{
+    int status;
+    pid_t got;
+
+    if (telem_pid <= 0) {
+        return;
+    }
+    got = waitpid(telem_pid, &status, block ? 0 : WNOHANG);
+    if (got != telem_pid) {
+        return;
+    }
+    printf("supervisor: telemetry pid=%d exit=%d signal=%d\n", (int)telem_pid,
+           WIFEXITED(status) ? WEXITSTATUS(status) : 0,
+           WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    fflush(stdout);
+    telem_pid = 0;
+    if (shutting_down) {
+        return;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return;
+    }
+    /*
+     * Telemetry is not a network node. Restart it without the limit
+     * that locks the path, and do not tell sink to enter SAFE.
+     * The pause keeps a process that exits at once from being
+     * spawned on every receive tick.
+     */
+    printf("supervisor: telemetry is not a network node, K unchanged\n");
+    fflush(stdout);
+    telem_restart_due = 1;
+    telem_restart_at = monotonic_ns() + 500000000LL;
+}
+
 static int usage(void)
 {
     fprintf(stderr,
-            "usage: supervisor -k K [-u N] [-c N] [-b N] [-g ms] [-w ms]\n");
+            "usage: supervisor -k K [-u N] [-c N] [-b N] [-g ms] [-w ms] [-L]\n");
     return EXIT_FAILURE;
 }
 
@@ -511,6 +608,10 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         unsigned long value;
 
+        if (strcmp(argv[i], "-L") == 0) {
+            live_source = 1;
+            continue;
+        }
         if (i + 1 >= argc || parse_u(argv[i + 1], &value) != 0) {
             return usage();
         }
@@ -567,6 +668,15 @@ int main(int argc, char **argv)
     printf("supervisor: watching with COIDDEATH, K=%lu\n", k_value);
     fflush(stdout);
 
+    if (setenv("SIGNAL_TELEMETRY", "1", 1) != 0) {
+        fprintf(stderr, "supervisor: could not enable telemetry reports: %s\n",
+                strerror(errno));
+    }
+    if (start_telemetry(0) != 0) {
+        fprintf(stderr,
+                "supervisor: telemetry did not start; the network still starts\n");
+    }
+
     if (start_node(ROLE_SINK, 0) != 0 || start_node(ROLE_RELAY_B, 0) != 0 ||
         start_node(ROLE_RELAY_A, 0) != 0 || start_node(ROLE_SOURCE, 0) != 0) {
         shutting_down = 1;
@@ -581,6 +691,16 @@ int main(int argc, char **argv)
 
         now_ns = monotonic_ns();
         note_progress(now_ns);
+        publish_nodes();
+        reap_telemetry(0);
+        if (telem_restart_due && !shutting_down && now_ns >= telem_restart_at) {
+            telem_restart_due = 0;
+            if (start_telemetry(1) != 0) {
+                fprintf(stderr, "supervisor: restart of telemetry failed\n");
+                telem_restart_due = 1;
+                telem_restart_at = now_ns + 500000000LL;
+            }
+        }
         if (nodes[ROLE_SOURCE].exited_ok && nodes[ROLE_SINK].exited_ok) {
             shutting_down = 1;
             kill_all();
@@ -620,6 +740,7 @@ int main(int argc, char **argv)
     for (i = 0; i < ROLE_COUNT; i++) {
         reap((enum role)i, 1, "stop");
     }
+    reap_telemetry(1);
     if (locked || nodes[ROLE_SINK].exited_ok) {
         return EXIT_SUCCESS;
     }

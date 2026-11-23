@@ -4,6 +4,8 @@
 #include "net_state.h"
 #include "signal_ledger.h"
 #include "signal_msg.h"
+#include "telemetry_pub.h"
+#include "telemetry_snap.h"
 #include "wire.h"
 
 #include <errno.h>
@@ -26,6 +28,75 @@ _Static_assert(SIGNAL_MANIFEST_CAP == SIGNAL_LEDGER_CAP,
 
 #define SAFETY_SECONDS 45u
 #define DEFAULT_GAP_MS 1000ul
+
+static const struct signal_ledger *pub_ledger;
+static enum net_state current_state = NET_INIT;
+static struct telem_window hop_window[3];
+static int telemetry_on;
+
+static void class_counts(const struct signal_ledger *ledger, uint32_t id,
+                         unsigned *on_time, unsigned *late, unsigned *lost,
+                         unsigned *dropped)
+{
+    unsigned number;
+
+    *on_time = 0;
+    *late = 0;
+    *lost = 0;
+    *dropped = 0;
+    for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
+        if (ledger->class_id[number] != id) {
+            continue;
+        }
+        if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME) {
+            (*on_time)++;
+        } else if (ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
+            (*late)++;
+        } else if (ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
+            (*lost)++;
+        } else if (ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
+            (*dropped)++;
+        }
+    }
+}
+
+static void publish_sink(const struct signal_ledger *ledger,
+                         enum net_state state, int flush)
+{
+    struct telem_class klass[3];
+    char buf[TELEM_REPORT_CAP];
+    int i;
+    int n;
+
+    if (!telemetry_on || ledger == NULL) {
+        return;
+    }
+    memset(klass, 0, sizeof klass);
+    for (i = 0; i < 3; i++) {
+        unsigned on_time;
+        unsigned late;
+        unsigned lost;
+        unsigned dropped;
+
+        class_counts(ledger, (uint32_t)(i + 1), &on_time, &late, &lost,
+                     &dropped);
+        klass[i].on_time = on_time;
+        klass[i].late = late;
+        klass[i].lost = lost;
+        klass[i].dropped = dropped;
+        telem_class_set_latency(&klass[i], &hop_window[i]);
+    }
+    n = telem_report_sink(buf, sizeof buf, state, klass);
+    if (n < 0) {
+        return;
+    }
+    if (flush) {
+        telem_pub_flush(buf, (size_t)n);
+        telemetry_on = 0;
+        return;
+    }
+    telem_pub_post(buf, (size_t)n);
+}
 
 struct receive_buffer {
     union {
@@ -125,12 +196,15 @@ static int parse_count(const char *text, unsigned long *out, int allow_zero)
 
 static void show_state(enum net_state *shown, enum net_state now)
 {
-    if (*shown == now) {
-        return;
+    current_state = now;
+    if (*shown != now) {
+        *shown = now;
+        printf("sink: state %s\n", net_state_name(now));
+        fflush(stdout);
     }
-    *shown = now;
-    printf("sink: state %s\n", net_state_name(now));
-    fflush(stdout);
+    if (pub_ledger != NULL) {
+        publish_sink(pub_ledger, now, 0);
+    }
 }
 
 static void print_signal(const struct signal *sig, enum signal_verdict verdict,
@@ -178,30 +252,16 @@ static void print_summary(const struct signal_ledger *ledger)
         unsigned late = 0;
         unsigned lost = 0;
         unsigned dropped = 0;
-        unsigned number;
 
-        for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
-            if (ledger->class_id[number] != id) {
-                continue;
-            }
-            if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME) {
-                received++;
-                on_time++;
-            } else if (ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
-                received++;
-                late++;
-            } else if (ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
-                lost++;
-            } else if (ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
-                dropped++;
-            }
-        }
+        class_counts(ledger, id, &on_time, &late, &lost, &dropped);
+        received = on_time + late;
         printf("sink: summary %s received %u, on time %u, late %u, lost %u, "
                "dropped %u\n",
                signal_class_name(id), received, on_time, late, lost, dropped);
     }
     printf("sink: unaccounted %u\n", signal_ledger_unaccounted(ledger));
     fflush(stdout);
+    publish_sink(ledger, current_state, 1);
 }
 
 static void print_lost(const struct signal_ledger *ledger, uint64_t number)
@@ -293,6 +353,17 @@ int main(int argc, char **argv)
     signal_ledger_init(&ledger);
     gap_ns = (int64_t)gap_ms * 1000000LL;
     net_machine_init(&machine, monotonic_ns(), gap_ns, NET_RECOVER_URGENT_NEED);
+    {
+        int i;
+
+        for (i = 0; i < 3; i++) {
+            telem_window_init(&hop_window[i]);
+        }
+    }
+    if (telem_pub_open("sink")) {
+        telemetry_on = 1;
+        pub_ledger = &ledger;
+    }
     show_state(&shown, machine.state);
 
     attach = name_attach(NULL, SIGNAL_ATTACH_NAME, 0);
@@ -493,6 +564,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "sink: signal %" PRIu64 " was already accounted\n",
                     buffer.body.message.body.number);
             continue;
+        }
+        if (telemetry_on &&
+            buffer.body.message.body.class_id >= SIGNAL_CLASS_URGENT &&
+            buffer.body.message.body.class_id <= SIGNAL_CLASS_BACKGROUND) {
+            int64_t latency = now_ns - buffer.body.message.body.issued_ns;
+
+            if (latency < 0) {
+                latency = 0;
+            }
+            telem_window_add(&hop_window[buffer.body.message.body.class_id - 1],
+                             latency);
         }
         net_machine_on_signal(&machine, buffer.body.message.body.class_id,
                               verdict, now_ns, &presentation);

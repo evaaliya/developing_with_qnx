@@ -53,6 +53,7 @@ run_chain() {
     slay -Q -f relay >/dev/null 2>&1 || true
     slay -Q -f source >/dev/null 2>&1 || true
     slay -Q -f sink >/dev/null 2>&1 || true
+    slay -Q -f telemetry >/dev/null 2>&1 || true
     wait "$relay_a" >/dev/null 2>&1 || true
     wait "$relay_b" >/dev/null 2>&1 || true
     set -e
@@ -122,9 +123,12 @@ background=${background:-6}
 echo "guest: $(uname -a)"
 
 slay -Q -f supervisor >/dev/null 2>&1 || true
+slay -Q -f telemetry >/dev/null 2>&1 || true
 slay -Q -f source >/dev/null 2>&1 || true
 slay -Q -f relay >/dev/null 2>&1 || true
 slay -Q -f sink >/dev/null 2>&1 || true
+# qconn ignores SIGTERM and keeps TCP 8000 (F-026). slay's default is SIGTERM.
+slay -Q -f -s SIGKILL qconn >/dev/null 2>&1 || true
 
 rm -f /tmp/supervisor.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out /tmp/source.out
 

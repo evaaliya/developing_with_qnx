@@ -6,6 +6,8 @@
 #include "signal_queue.h"
 #include "signal_sched.h"
 #include "source_ctl.h"
+#include "telemetry_pub.h"
+#include "telemetry_snap.h"
 #include "wire.h"
 
 #include <errno.h>
@@ -41,6 +43,46 @@ static void ctl_lock(void)
 static void ctl_unlock(void)
 {
     pthread_mutex_unlock(&g_lock);
+}
+
+static int telemetry_on;
+
+static void publish_source(int flush)
+{
+    char buf[TELEM_REPORT_CAP];
+    enum telem_mode mode;
+    uint64_t urgent;
+    uint64_t command;
+    uint64_t background;
+    int n;
+
+    if (!telemetry_on) {
+        return;
+    }
+    ctl_lock();
+    mode = telem_mode_from_flags(g_ctl.flood, g_ctl.urgent_on);
+    urgent = g_ctl.issued_urgent;
+    command = g_ctl.issued_command;
+    background = g_ctl.issued_background;
+    ctl_unlock();
+    n = telem_report_source(buf, sizeof buf, mode, urgent, command, background);
+    if (n < 0) {
+        return;
+    }
+    if (flush) {
+        telem_pub_flush(buf, (size_t)n);
+        telemetry_on = 0;
+        return;
+    }
+    telem_pub_post(buf, (size_t)n);
+}
+
+static void open_telemetry(void)
+{
+    telemetry_on = telem_pub_open("source");
+    if (telemetry_on) {
+        publish_source(0);
+    }
 }
 
 /* Placeholder until a measured deadline is chosen. One local message fits. */
@@ -223,6 +265,7 @@ static int send_recorded(int coid, struct signal_manifest *manifest,
     ctl_lock();
     source_ctl_note_issued(&g_ctl, class_id);
     ctl_unlock();
+    publish_source(0);
     manifest->item[*recorded].number = *number;
     manifest->item[*recorded].class_id = class_id;
     (*recorded)++;
@@ -289,6 +332,7 @@ static int send_manifest(int coid, struct signal_manifest *manifest,
     if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
         return -1;
     }
+    publish_source(1);
     manifest->count = (uint16_t)recorded;
     alarm(MANIFEST_TIMEOUT_SECONDS);
     sent = MsgSend(coid, manifest, sizeof *manifest, NULL, 0);
@@ -388,6 +432,7 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
     if (status != 0) {
         return EINVAL;
     }
+    publish_source(0);
     _IO_SET_WRITE_NBYTES(ctp, nbytes);
     return EOK;
 }
@@ -522,6 +567,7 @@ static int run_live(int argc, char **argv)
     }
     next_name = argv[2];
     source_ctl_init(&g_ctl, 1);
+    open_telemetry();
     if (install_alarm() != 0 || pin_cpu0() != 0) {
         return EXIT_FAILURE;
     }
@@ -827,6 +873,7 @@ int main(int argc, char **argv)
     fflush(stdout);
 
     source_ctl_init(&g_ctl, 0);
+    open_telemetry();
     if (start_device() != 0) {
         return EXIT_FAILURE;
     }

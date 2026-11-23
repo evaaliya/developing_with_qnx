@@ -28,6 +28,7 @@ show_status() {
 echo "guest: $(uname -a)"
 
 slay -Q -f supervisor >/dev/null 2>&1 || true
+slay -Q -f telemetry >/dev/null 2>&1 || true
 slay -Q -f source >/dev/null 2>&1 || true
 slay -Q -f relay >/dev/null 2>&1 || true
 slay -Q -f sink >/dev/null 2>&1 || true
