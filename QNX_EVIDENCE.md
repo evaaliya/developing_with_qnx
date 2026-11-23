@@ -1257,3 +1257,123 @@ Each cell is from the run that wrote the log named in the row. Lost, late, and u
 | K crashes in a row. `make run-lock`, log mtime 2026-11-23 19:48:36 +06, exit 0 | yes | LOCKED_SAFE. One restart, then lock. Sink printed that the manifest did not arrive | 0 | 0 | 0 |
 
 The same evening, after these changes, `make run` (log mtime 19:48:06 +06) and `make run-flood` (19:48:13 +06) also exited 0. Calm: 9 signals on time, lost 0, late 0, `unaccounted 0`. Flood: dropped signals 38 and 45, both BACKGROUND; URGENT on time 3; COMMAND on time 3; BACKGROUND received 38, dropped 2; `unaccounted 0`.
+
+## B16: `/dev/signal-source`
+
+Host clock for this run: 2026-11-23 20:41:03–20:41:16 +06. `make run-dev` from `project-kit`, exit 0. Guest, printed by the scenario before any command:
+
+```
+guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+`source live` registers `/dev/signal-source` with `resmgr_attach` and issues each class from a `CLOCK_MONOTONIC` timer pulse (`timer_create`, `SIGEV_PULSE`, `MsgRegisterEvent`). The counted burst used by `make measure` is unchanged. Commands are one line each, written with `echo` and read with `cat`.
+
+```
+scenario: path after start
+nrw-rw-rw-  1 root root 0 2026-11-23 14:41 /dev/signal-source
+scenario: cat after start
+emission live
+mode normal
+flood off
+urgent on
+stop no
+issued URGENT 1
+issued COMMAND 1
+issued BACKGROUND 1
+error none
+scenario: command flood on
+scenario: cat during flood
+emission live
+mode flood
+flood on
+urgent on
+stop no
+issued URGENT 1
+issued COMMAND 1
+issued BACKGROUND 29
+error none
+scenario: command flood off
+scenario: cat after flood off
+emission live
+mode normal
+flood off
+urgent on
+stop no
+issued URGENT 1
+issued COMMAND 1
+issued BACKGROUND 29
+error none
+scenario: command urgent off
+scenario: cat while urgent is off
+emission live
+mode mute
+flood off
+urgent off
+stop no
+issued URGENT 5
+issued COMMAND 3
+issued BACKGROUND 33
+error none
+scenario: source still alive pid 26177560
+scenario: command restore
+scenario: cat after restore
+emission live
+mode normal
+flood off
+urgent on
+stop no
+issued URGENT 6
+issued COMMAND 5
+issued BACKGROUND 36
+error none
+scenario: bad command
+scenario: bad command reply
+scenario: cat after bad command
+emission live
+mode normal
+flood off
+urgent on
+stop no
+issued URGENT 8
+issued COMMAND 7
+issued BACKGROUND 38
+error unknown command
+scenario: source still alive after the bad command pid 26177560
+```
+
+The shell left the captured stderr of `echo nope` empty. The script treats a zero exit from that `echo` as a failure, and this run continued, so the write failed. The device reply is the line `error unknown command`. Source pid 26177560 was still alive, and `stop` then ended the run with source exit 0.
+
+Relay A dropped three signals, and only those three: 20, 23, and 30, each `class BACKGROUND`. After `flood off`, the next second of the relay A log had no further `dropped signal` line. Sink:
+
+```
+sink: state SAFE
+sink: signal 47 class URGENT on time, held, hops 56992 ns, 467008 ns, 196992 ns, total 720992 ns
+sink: state RECOVERING
+sink: signal 52 class URGENT on time, fresh, hops 236000 ns, 1568000 ns, 594000 ns, total 2398000 ns
+sink: state NORMAL
+sink: state DEGRADED
+sink: summary URGENT received 8, on time 8, late 0, lost 0, dropped 0
+sink: summary COMMAND received 7, on time 7, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 35, on time 35, late 0, lost 0, dropped 3
+sink: unaccounted 0
+```
+
+DEGRADED is the manifest applying those three drops. It is after NORMAL. No process was killed for the mute.
+
+`make run-source` the same evening, 20:42:10–20:42:26 +06, exit 0, same guest line. Before the kill, `ls` printed `/dev/signal-source`. After the kill the path was gone. After `supervisor: restarted source` it was back:
+
+```
+scenario: path before kill
+nrw-rw-rw-  1 root root 0 2026-11-23 14:42 /dev/signal-source
+scenario: path gone after the kill
+scenario: path after restart
+nrw-rw-rw-  1 root root 0 2026-11-23 14:42 /dev/signal-source
+```
+
+### R8, source stops issuing URGENT
+
+| Failure | Reached SAFE | Network after | lost | late | unaccounted |
+| --- | --- | --- | ---: | ---: | ---: |
+| Source stops issuing URGENT and stays alive. `make run-dev`, 2026-11-23 20:41:03–20:41:16 +06, exit 0. Source pid 26177560 was alive at SAFE and after the bad command | yes, `sink: state SAFE` | NORMAL after `restore`, then DEGRADED when the manifest counted 3 dropped BACKGROUND | 0 | 0 | 0 |
+
+`make measure` N=34, 20:42:26–20:43:04 +06, exit 0. 68 logs, each `sink: unaccounted 0`. R5 violations: calm relay A 0, relay B 0, flood relay A 0, relay B 0, sum 0. URGENT total median under flood 701008 ns (0.701008 ms).
