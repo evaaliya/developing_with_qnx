@@ -4,6 +4,8 @@
 # relay A. Counts come from the host so make run and make run-flood keep
 # their numbers. kill: one death of relay B, then recovery.
 # lock: K deaths in a row, then LOCKED_SAFE. K is chosen here.
+# stop: SIGSTOP relay B, then SIGCONT. The process stays alive.
+# source: one death of source, then the supervisor restarts it.
 set -eu
 
 # Prints the same sections make run used to print from the ssh command.
@@ -100,11 +102,22 @@ flood)
     ;;
 kill) k=3 ;;
 lock) k=2 ;;
+stop)
+    k=3
+    urgent=20
+    command=10
+    background=10
+    ;;
+source) k=3 ;;
 *)
-    echo "usage: qnx-scenario.sh calm|flood|kill|lock" >&2
+    echo "usage: qnx-scenario.sh calm|flood|kill|lock|stop|source" >&2
     exit 2
     ;;
 esac
+
+urgent=${urgent:-12}
+command=${command:-6}
+background=${background:-6}
 
 echo "guest: $(uname -a)"
 
@@ -115,7 +128,7 @@ slay -Q -f sink >/dev/null 2>&1 || true
 
 rm -f /tmp/supervisor.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out /tmp/source.out
 
-/tmp/supervisor -k "$k" -u 12 -c 6 -b 6 -g 200 -w 2000 >/tmp/supervisor.out 2>&1 &
+/tmp/supervisor -k "$k" -u "$urgent" -c "$command" -b "$background" -g 200 -w 2000 >/tmp/supervisor.out 2>&1 &
 sup=$!
 
 i=0
@@ -140,8 +153,58 @@ if [ -z "$pid" ]; then
     exit 1
 fi
 
-echo "scenario: killing relay-b pid $pid"
-kill -KILL "$pid"
+if [ "$mode" = "stop" ]; then
+    echo "scenario: stopping relay-b pid $pid"
+    kill -STOP "$pid"
+    s=0
+    while [ "$s" -lt 8 ]; do
+        if grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
+            break
+        fi
+        s=$((s + 1))
+        sleep 1
+    done
+    if ! grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
+        echo "scenario: sink did not reach SAFE while relay-b was stopped"
+        kill -CONT "$pid" >/dev/null 2>&1 || true
+        kill -KILL "$sup" >/dev/null 2>&1 || true
+        wait "$sup" >/dev/null 2>&1 || true
+        echo "--- supervisor ---"
+        cat /tmp/supervisor.out 2>/dev/null || true
+        echo "--- sink ---"
+        cat /tmp/sink.out 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        echo "scenario: relay-b died while stopped"
+        exit 1
+    fi
+    echo "scenario: relay-b still alive pid $pid"
+    pidin -p "$pid" || true
+    if grep 'supervisor: restarted relay-b' /tmp/supervisor.out >/dev/null 2>&1; then
+        echo "scenario: relay-b was restarted while stopped"
+        kill -CONT "$pid" >/dev/null 2>&1 || true
+        exit 1
+    fi
+    echo "scenario: continuing relay-b pid $pid"
+    kill -CONT "$pid"
+elif [ "$mode" = "source" ]; then
+    source_pid=$(grep 'supervisor: node source pid=' /tmp/supervisor.out | tail -1 | sed 's/.*pid=//')
+    if [ -z "$source_pid" ]; then
+        echo "scenario: source was not ready"
+        kill -KILL "$sup" >/dev/null 2>&1 || true
+        wait "$sup" >/dev/null 2>&1 || true
+        echo "--- supervisor ---"
+        cat /tmp/supervisor.out 2>/dev/null || true
+        exit 1
+    fi
+    echo "scenario: killing source pid $source_pid"
+    kill -KILL "$source_pid"
+else
+    echo "scenario: killing relay-b pid $pid"
+    kill -KILL "$pid"
+fi
 
 if [ "$mode" = "lock" ]; then
     j=0
@@ -193,6 +256,31 @@ if [ "$mode" = "kill" ]; then
 fi
 if [ "$mode" = "lock" ]; then
     grep 'LOCKED_SAFE' /tmp/supervisor.out /tmp/sink.out >/dev/null
+fi
+if [ "$mode" = "stop" ]; then
+    if grep 'supervisor: restarted relay-b' /tmp/supervisor.out >/dev/null; then
+        echo "scenario: relay-b was restarted" >&2
+        exit 1
+    fi
+    awk '
+        /sink: state SAFE/ { safe = 1 }
+        safe && /sink: state NORMAL/ { back = 1 }
+        /sink: unaccounted 0/ { books = 1 }
+        /sink: signal / && / late/ && /, fresh/ { bad_fresh++ }
+        /sink: signal / && / on time/ && $(NF) == "ns" && $(NF-2) == "total" && ($(NF-1) + 0) > 1000000000 { bad_ontime++ }
+        /sink: signal / && / late/ { late_n++ }
+        END { exit (safe && back && books && late_n > 0 && bad_fresh == 0 && bad_ontime == 0) ? 0 : 1 }
+    ' /tmp/sink.out
+fi
+if [ "$mode" = "source" ]; then
+    awk '
+        /sink: state SAFE/ { safe = 1 }
+        safe && /sink: state NORMAL/ { back = 1 }
+        END { exit back ? 0 : 1 }
+    ' /tmp/sink.out
+    grep 'supervisor: restarted source' /tmp/supervisor.out >/dev/null
+    grep 'died before its issued list arrived' /tmp/sink.out >/dev/null
+    grep 'sink: unaccounted 0' /tmp/sink.out >/dev/null
 fi
 
 exit "$status"

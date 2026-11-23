@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "issued_log.h"
 #include "net_state.h"
 #include "signal_ledger.h"
 #include "signal_msg.h"
@@ -420,6 +421,19 @@ int main(int argc, char **argv)
                 }
             }
             manifest_seen = 1;
+            if (issued_list_is_rebuilt(buffer.body.manifest.reserved)) {
+                printf("sink: %s\n", issued_list_rebuilt_sentence());
+                fflush(stdout);
+            }
+            {
+                unsigned missed = signal_ledger_arrived_unissued(&ledger);
+
+                if (missed > 0) {
+                    printf("sink: issued list did not include %u arrivals\n",
+                           missed);
+                    fflush(stdout);
+                }
+            }
             for (item = 0; item < buffer.body.manifest.count; item++) {
                 struct signal_manifest_item *one = &buffer.body.manifest.item[item];
 

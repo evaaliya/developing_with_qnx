@@ -83,6 +83,26 @@ int signal_ledger_drop(struct signal_ledger *ledger, uint64_t number)
     return 0;
 }
 
+unsigned signal_ledger_arrived_unissued(const struct signal_ledger *ledger)
+{
+    unsigned missing = 0;
+    unsigned number;
+
+    if (ledger == NULL) {
+        return 0;
+    }
+    for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
+        if (ledger->issued[number]) {
+            continue;
+        }
+        if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME ||
+            ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
+            missing++;
+        }
+    }
+    return missing;
+}
+
 unsigned signal_ledger_unaccounted(const struct signal_ledger *ledger)
 {
     unsigned missing = 0;

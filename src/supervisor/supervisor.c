@@ -1,5 +1,7 @@
 #define _QNX_SOURCE
 
+#include "issued_log.h"
+#include "node_fault.h"
 #include "restart_limit.h"
 #include "wire.h"
 
@@ -52,6 +54,8 @@ static unsigned long command_count = 3;
 static unsigned long background_count = 3;
 static unsigned long gap_ms;
 static unsigned long window_ms = 1000;
+static uint64_t source_next = 1;
+static int source_restart;
 
 static int64_t monotonic_ns(void)
 {
@@ -150,7 +154,8 @@ static int start_node(enum role role, int restarted)
     char background_buf[32];
     char gap_buf[32];
     char window_buf[32];
-    char *argv[8];
+    char next_buf[32];
+    char *argv[12];
     char *path;
     pid_t pid;
     int truncate = node->starts == 0;
@@ -180,24 +185,31 @@ static int start_node(enum role role, int restarted)
         argv[2] = "signal-relay-b";
         argv[3] = NULL;
         break;
-    case ROLE_SOURCE:
+    case ROLE_SOURCE: {
+        int n = 0;
+
         snprintf(urgent_buf, sizeof urgent_buf, "%lu", urgent_count);
         snprintf(command_buf, sizeof command_buf, "%lu", command_count);
         snprintf(background_buf, sizeof background_buf, "%lu", background_count);
         snprintf(gap_buf, sizeof gap_buf, "%lu", gap_ms);
         path = "/tmp/source";
-        argv[0] = path;
-        argv[1] = urgent_buf;
-        argv[2] = command_buf;
-        argv[3] = background_buf;
-        argv[4] = "signal-relay-a";
-        if (gap_ms > 0) {
-            argv[5] = gap_buf;
-            argv[6] = NULL;
-        } else {
-            argv[5] = NULL;
+        argv[n++] = path;
+        if (source_restart) {
+            snprintf(next_buf, sizeof next_buf, "%llu",
+                     (unsigned long long)source_next);
+            argv[n++] = "-n";
+            argv[n++] = next_buf;
         }
+        argv[n++] = urgent_buf;
+        argv[n++] = command_buf;
+        argv[n++] = background_buf;
+        argv[n++] = "signal-relay-a";
+        if (gap_ms > 0) {
+            argv[n++] = gap_buf;
+        }
+        argv[n] = NULL;
         break;
+    }
     default:
         return -1;
     }
@@ -265,6 +277,83 @@ static void send_lock(void)
     }
 }
 
+static int read_text(const char *path, char *buf, size_t cap, size_t *used)
+{
+    FILE *file;
+    size_t n;
+
+    file = fopen(path, "r");
+    if (file == NULL) {
+        fprintf(stderr, "supervisor: opening %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+    n = fread(buf, 1, cap - 1, file);
+    if (ferror(file)) {
+        fprintf(stderr, "supervisor: reading %s failed: %s\n", path, strerror(errno));
+        fclose(file);
+        return -1;
+    }
+    if (!feof(file)) {
+        fprintf(stderr, "supervisor: %s is too large\n", path);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    buf[n] = '\0';
+    *used = n;
+    return 0;
+}
+
+/* Copy printed source lines so the restarted source can rebuild the list. */
+static int snapshot_source(uint64_t *next)
+{
+    char text[16384];
+    struct issued_item items[SIGNAL_MANIFEST_CAP];
+    unsigned count = 0;
+    uint64_t max_number = 0;
+    uint64_t restart_at = 0;
+    FILE *out;
+    unsigned i;
+    size_t used = 0;
+
+    if (read_text("/tmp/source.out", text, sizeof text, &used) != 0) {
+        return -1;
+    }
+    if (issued_list_parse(text, items, SIGNAL_MANIFEST_CAP, &count,
+                          &max_number) != 0 ||
+        issued_list_restart_number(max_number, count > 0, &restart_at) != 0) {
+        fprintf(stderr, "supervisor: the source log is not a list of sent signals\n");
+        return -1;
+    }
+    out = fopen(ISSUED_LIST_PATH, "w");
+    if (out == NULL) {
+        fprintf(stderr, "supervisor: opening %s failed: %s\n",
+                ISSUED_LIST_PATH, strerror(errno));
+        return -1;
+    }
+    for (i = 0; i < count; i++) {
+        char line[128];
+
+        if (issued_list_line(&items[i], line, sizeof line) != 0 ||
+            fputs(line, out) == EOF) {
+            fprintf(stderr, "supervisor: writing %s failed: %s\n",
+                    ISSUED_LIST_PATH, strerror(errno));
+            fclose(out);
+            return -1;
+        }
+    }
+    if (fclose(out) == EOF) {
+        fprintf(stderr, "supervisor: closing %s failed: %s\n",
+                ISSUED_LIST_PATH, strerror(errno));
+        return -1;
+    }
+    *next = restart_at;
+    printf("supervisor: source issued list %u, next %llu\n",
+           count, (unsigned long long)restart_at);
+    fflush(stdout);
+    return 0;
+}
+
 static int handle_status(enum role role, int status, const char *how)
 {
     struct watched *node = &nodes[role];
@@ -286,7 +375,7 @@ static int handle_status(enum role role, int status, const char *how)
         return 0;
     }
 
-    if (shutting_down || role == ROLE_SOURCE) {
+    if (shutting_down) {
         node->pid = 0;
         return 0;
     }
@@ -296,7 +385,11 @@ static int handle_status(enum role role, int status, const char *how)
         name_close(node->coid);
         node->coid = -1;
     }
-    if (!restart_limit_on_death(&node->limit)) {
+    /*
+     * A stopped child is not a death: waitpid is not passed WUNTRACED,
+     * so this function does not run for SIGSTOP (D-052).
+     */
+    if (node_fault_action(NODE_DEAD, &node->limit) != NODE_ACTION_RESTART) {
         printf("supervisor: LOCKED_SAFE\n");
         fflush(stdout);
         locked = 1;
@@ -308,6 +401,13 @@ static int handle_status(enum role role, int status, const char *how)
     printf("supervisor: %s streak=%d limit=%d\n",
            node->role, node->limit.streak, node->limit.limit);
     fflush(stdout);
+    if (role == ROLE_SOURCE) {
+        if (snapshot_source(&source_next) != 0) {
+            fprintf(stderr, "supervisor: could not keep the source issued list\n");
+            return -1;
+        }
+        source_restart = 1;
+    }
     {
         struct timespec pause;
         unsigned long hold_ms = window_ms + 500UL;
@@ -449,6 +549,14 @@ int main(int argc, char **argv)
     for (i = 0; i < ROLE_COUNT; i++) {
         restart_limit_init(&nodes[i].limit, (int)k_value);
     }
+
+    if (unlink(ISSUED_LIST_PATH) == -1 && errno != ENOENT) {
+        fprintf(stderr, "supervisor: removing %s failed: %s\n",
+                ISSUED_LIST_PATH, strerror(errno));
+        return EXIT_FAILURE;
+    }
+    source_restart = 0;
+    source_next = 1;
 
     chid = ChannelCreate(_NTO_CHF_COID_DISCONNECT | _NTO_CHF_PRIVATE);
     if (chid == -1) {

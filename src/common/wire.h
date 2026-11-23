@@ -23,6 +23,12 @@
 /* Set on a manifest item the relay dropped. Other reserved values stay. */
 #define SIGNAL_MANIFEST_DROPPED ((uint32_t)1)
 
+/*
+ * Set on the manifest header when a restarted source rebuilt the list
+ * from lines the dead source had already printed (D-052).
+ */
+#define SIGNAL_MANIFEST_REBUILT ((uint32_t)1)
+
 struct signal_manifest_item {
     uint64_t number;
     uint32_t class_id;

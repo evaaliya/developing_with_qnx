@@ -59,4 +59,10 @@ int signal_ledger_drop(struct signal_ledger *ledger, uint64_t number);
 /* Issued numbers that are still unaccounted. */
 unsigned signal_ledger_unaccounted(const struct signal_ledger *ledger);
 
+/*
+ * Arrivals (on time or late) whose number was never on an issued list.
+ * Lost and dropped do not count: a loss is not an arrival.
+ */
+unsigned signal_ledger_arrived_unissued(const struct signal_ledger *ledger);
+
 #endif

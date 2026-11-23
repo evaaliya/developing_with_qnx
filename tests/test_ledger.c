@@ -142,6 +142,31 @@ int main(void)
     expect_int("arrived command stays on time",
                ledger.account[12] == SIGNAL_ACCOUNT_ON_TIME, 1);
 
+    signal_ledger_init(&ledger);
+    expect_int("arrival before any list",
+               signal_ledger_receive(&ledger, 4, SIGNAL_CLASS_URGENT,
+                                     SIGNAL_ON_TIME),
+               0);
+    expect_u("that arrival is not on a list",
+             signal_ledger_arrived_unissued(&ledger), 1);
+    expect_int("the rebuilt list names it",
+               signal_ledger_issue(&ledger, 4, SIGNAL_CLASS_URGENT), 0);
+    expect_int("the rebuilt list names one that never arrived",
+               signal_ledger_issue(&ledger, 5, SIGNAL_CLASS_COMMAND), 0);
+    expect_u("the named arrival is no longer unlisted",
+             signal_ledger_arrived_unissued(&ledger), 0);
+    expect_u("the missing named number is open",
+             signal_ledger_unaccounted(&ledger), 1);
+    expect_int("close the missing named number",
+               signal_ledger_lose(&ledger, 5, SIGNAL_CLASS_COMMAND), 0);
+    expect_u("rebuilt books close", signal_ledger_unaccounted(&ledger), 0);
+    expect_int("an in-flight number the log did not print",
+               signal_ledger_receive(&ledger, 6, SIGNAL_CLASS_URGENT,
+                                     SIGNAL_LATE),
+               0);
+    expect_u("the unprinted arrival stays off the list",
+             signal_ledger_arrived_unissued(&ledger), 1);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

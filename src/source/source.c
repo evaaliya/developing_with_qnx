@@ -1,6 +1,7 @@
 #define _QNX_SOURCE
 
 #include "issue_order.h"
+#include "issued_log.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
@@ -152,6 +153,42 @@ static void pause_gap(unsigned long gap_ms)
     nanosleep(&pause, NULL);
 }
 
+static int load_issued(struct issued_item *items, unsigned *count,
+                       uint64_t *max_number)
+{
+    FILE *file;
+    char buf[8192];
+    size_t n;
+
+    file = fopen(ISSUED_LIST_PATH, "r");
+    if (file == NULL) {
+        fprintf(stderr, "source: opening %s failed: %s\n",
+                ISSUED_LIST_PATH, strerror(errno));
+        return -1;
+    }
+    n = fread(buf, 1, sizeof buf - 1, file);
+    if (ferror(file)) {
+        fprintf(stderr, "source: reading %s failed: %s\n",
+                ISSUED_LIST_PATH, strerror(errno));
+        fclose(file);
+        return -1;
+    }
+    if (!feof(file)) {
+        fprintf(stderr, "source: %s is too large\n", ISSUED_LIST_PATH);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    buf[n] = '\0';
+    if (issued_list_parse(buf, items, SIGNAL_MANIFEST_CAP, count,
+                          max_number) != 0) {
+        fprintf(stderr, "source: %s is not a list of sent signals\n",
+                ISSUED_LIST_PATH);
+        return -1;
+    }
+    return 0;
+}
+
 static int send_one(int coid, uint64_t number, uint32_t class_id);
 
 static int send_recorded(int coid, struct signal_manifest *manifest,
@@ -225,29 +262,50 @@ int main(int argc, char **argv)
     unsigned long gap_ms = 0;
     unsigned long total;
     unsigned long recorded = 0;
-    uint64_t number;
+    uint64_t number = 1;
     int coid;
     int ceiling;
     int arg0 = 1;
     int have_seed = 0;
+    int have_start = 0;
     uint32_t seed = 0;
     uint32_t plan[SIGNAL_QUEUE_CAP];
     uint32_t planned = 0;
     uint32_t step;
     struct signal_manifest manifest;
+    struct issued_item prior[SIGNAL_MANIFEST_CAP];
+    unsigned prior_count = 0;
     long sent;
 
-    if (argc >= 3 && strcmp(argv[1], "-s") == 0) {
-        unsigned long seed_value;
+    while (arg0 < argc && argv[arg0][0] == '-' && argv[arg0][1] != '\0') {
+        unsigned long value;
 
-        if (parse_count(argv[2], &seed_value) != 0 || seed_value > UINT32_MAX) {
-            fprintf(stderr, "usage: source [-s seed] <urgent-count> "
+        if (arg0 + 1 >= argc || parse_count(argv[arg0 + 1], &value) != 0) {
+            fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
                     "<command-count> <background-count> <next-name> [gap-ms]\n");
             return EXIT_FAILURE;
         }
-        have_seed = 1;
-        seed = (uint32_t)seed_value;
-        arg0 = 3;
+        if (strcmp(argv[arg0], "-s") == 0) {
+            if (have_seed || value > UINT32_MAX) {
+                fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
+                        "<command-count> <background-count> <next-name> [gap-ms]\n");
+                return EXIT_FAILURE;
+            }
+            have_seed = 1;
+            seed = (uint32_t)value;
+        } else if (strcmp(argv[arg0], "-n") == 0) {
+            if (have_start || value < 1 || value > SIGNAL_LEDGER_CAP) {
+                fprintf(stderr, "source: -n must be 1..%d\n", SIGNAL_LEDGER_CAP);
+                return EXIT_FAILURE;
+            }
+            have_start = 1;
+            number = value;
+        } else {
+            fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
+                    "<command-count> <background-count> <next-name> [gap-ms]\n");
+            return EXIT_FAILURE;
+        }
+        arg0 += 2;
     }
     if ((argc - arg0 != 4 && argc - arg0 != 5) ||
         parse_count(argv[arg0], &urgent) != 0 ||
@@ -255,7 +313,7 @@ int main(int argc, char **argv)
         parse_count(argv[arg0 + 2], &background) != 0 ||
         argv[arg0 + 3][0] == '\0' ||
         (argc - arg0 == 5 && parse_count(argv[arg0 + 4], &gap_ms) != 0)) {
-        fprintf(stderr, "usage: source [-s seed] <urgent-count> "
+        fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
                 "<command-count> <background-count> <next-name> [gap-ms]\n");
         return EXIT_FAILURE;
     }
@@ -299,6 +357,33 @@ int main(int argc, char **argv)
 
     memset(&manifest, 0, sizeof manifest);
     manifest.type = SIGNAL_MSG_MANIFEST;
+    if (have_start) {
+        uint64_t max_number = 0;
+        uint64_t expect = 0;
+        unsigned manifest_total = 0;
+        unsigned item;
+
+        if (load_issued(prior, &prior_count, &max_number) != 0) {
+            name_close(coid);
+            return EXIT_FAILURE;
+        }
+        if (issued_list_restart_number(max_number, prior_count > 0, &expect) != 0 ||
+            expect != number ||
+            issued_list_fits(prior, prior_count, number, (unsigned)total,
+                             SIGNAL_MANIFEST_CAP, &manifest_total) != 0) {
+            fprintf(stderr,
+                    "source: the restarted list does not continue from %s\n",
+                    ISSUED_LIST_PATH);
+            name_close(coid);
+            return EXIT_FAILURE;
+        }
+        for (item = 0; item < prior_count; item++) {
+            manifest.item[recorded].number = prior[item].number;
+            manifest.item[recorded].class_id = prior[item].class_id;
+            recorded++;
+        }
+        manifest.reserved = SIGNAL_MANIFEST_REBUILT;
+    }
     if (issue_order_burst(have_seed, seed, (uint32_t)urgent, (uint32_t)command,
                           (uint32_t)background, plan, SIGNAL_QUEUE_CAP,
                           &planned) != 0 ||
@@ -307,7 +392,6 @@ int main(int argc, char **argv)
         name_close(coid);
         return EXIT_FAILURE;
     }
-    number = 1;
     for (step = 0; step < planned; step++) {
         if (send_recorded(coid, &manifest, &recorded, &number, plan[step],
                           gap_ms) != 0) {
