@@ -1461,3 +1461,89 @@ Both commands were `scripts/qnx-s4.sh 10`. Each printed `s4: live seconds 10` an
 | Difference, fault minus calm | 0 | 0 | −222504 ns | +572992 ns | 0 |
 
 p99 is `n/a` in both: the report needs at least 100 samples, and each run has 20. The fault log contains `supervisor: restarted telemetry pid=81137686`. COMMAND received 13 on time in both. BACKGROUND received 20 on time in both.
+
+## 2026-11-24 00:36 +06 · one command for S1–S4
+
+Command, from this checkout:
+
+```text
+make scenarios
+```
+
+It ran from 00:36:45 to 00:37:42 +06. Exit code 0. `scenarios failed 0`.
+
+Guest after this run and after the later `make measure N=34`, at 00:40:52 +06:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+Table printed by that command. Every number is from this run. A cell says `порога нет` when no threshold is recorded for that requirement, and that cell is not a pass.
+
+```text
+scenario | requirement | numbers | verdict
+S1 | R1 | URGENT on time 9/9 | порога нет
+S1 | R3 | URGENT n 9 median 2822000 ns p99 n/a max 15233008 ns; COMMAND n 6 median 2257992 ns p99 n/a max 8442000 ns; BACKGROUND n 9 median 4136000 ns p99 n/a max 8047008 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 9 COMMAND 6 BACKGROUND 9; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 6/6 against S1 9/9 | порога нет
+S2 | R2 median | URGENT median 2061496 ns; S1 median 2822000 ns; threshold 2x S1 5644000 ns | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 0; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 0; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 46; flood signals 40; window ms 2000; duration ns 2081086000; span ns 2035935008 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2143572000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 2988210992 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 9/9 S4 9/9; R3 URGENT median delta -548000 ns; max delta -12739008 ns; S4 median 2274000 ns max 2494000 ns | порога нет
+S4 | checks | panel and telemetry killed during a 4 s window | прошёл
+scenarios failed 0
+```
+
+## 2026-11-24 00:36 +06 · one command for S1–S4
+
+Command, from this checkout:
+
+```text
+make scenarios
+```
+
+It ran from 00:36:45 to 00:37:42 +06. Exit code 0. `scenarios failed 0`.
+
+Guest after this run and after the later `make measure N=34`, at 00:40:52 +06:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+Table printed by that command. Every number is from this run. A cell says `порога нет` when no threshold is recorded for that requirement, and that cell is not a pass.
+
+```text
+scenario | requirement | numbers | verdict
+S1 | R1 | URGENT on time 9/9 | порога нет
+S1 | R3 | URGENT n 9 median 2822000 ns p99 n/a max 15233008 ns; COMMAND n 6 median 2257992 ns p99 n/a max 8442000 ns; BACKGROUND n 9 median 4136000 ns p99 n/a max 8047008 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 9 COMMAND 6 BACKGROUND 9; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 6/6 against S1 9/9 | порога нет
+S2 | R2 median | URGENT median 2061496 ns; S1 median 2822000 ns; threshold 2x S1 5644000 ns | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 0; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 0; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 46; flood signals 40; window ms 2000; duration ns 2081086000; span ns 2035935008 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2143572000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 2988210992 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 9/9 S4 9/9; R3 URGENT median delta -548000 ns; max delta -12739008 ns; S4 median 2274000 ns max 2494000 ns | порога нет
+S4 | checks | panel and telemetry killed during a 4 s window | прошёл
+scenarios failed 0
+```
