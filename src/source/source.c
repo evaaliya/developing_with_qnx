@@ -450,6 +450,13 @@ static void *device_thread(void *arg)
     dispatch_context_t *ctp = arg;
 
     (void)pin_cpu0();
+    /*
+     * Commands run at COMMAND priority on a fixed-priority channel, so
+     * "flood off" is not stuck behind the BACKGROUND work it caused (D-060).
+     */
+    if (set_fifo(SIGNAL_PRIO_COMMAND) != 0) {
+        return NULL;
+    }
     for (;;) {
         ctp = dispatch_block(ctp);
         if (ctp == NULL) {
@@ -475,8 +482,21 @@ static int start_device(void)
     int attempt;
     int created;
     int id = -1;
+    int chid;
 
-    g_dpp = dispatch_create_channel(-1, DISPATCH_FLAG_NOLOCK);
+    /*
+     * A message would otherwise lend the device thread the shell's
+     * priority (10), below the BACKGROUND flood (12). U1: a channel
+     * given to resmgr_attach needs _NTO_CHF_UNBLOCK and _NTO_CHF_DISCONNECT.
+     */
+    chid = ChannelCreate(_NTO_CHF_FIXED_PRIORITY | _NTO_CHF_UNBLOCK |
+                         _NTO_CHF_DISCONNECT);
+    if (chid == -1) {
+        fprintf(stderr, "source: creating the %s channel failed: %s\n",
+                SOURCE_DEV_PATH, strerror(errno));
+        return -1;
+    }
+    g_dpp = dispatch_create_channel(chid, DISPATCH_FLAG_NOLOCK);
     if (g_dpp == NULL) {
         fprintf(stderr, "source: creating the dispatch failed: %s\n",
                 strerror(errno));
@@ -634,24 +654,26 @@ static int send_flood_batch(unsigned count)
         return 0;
     }
     batch.count = (uint16_t)sent_n;
-    alarm(SEND_TIMEOUT_SECONDS);
-    sent = MsgSend(g_live.coid, &batch, sizeof batch, NULL, 0);
-    alarm(0);
-    if (sent == -1) {
-        fprintf(stderr, "source: sending a BACKGROUND batch failed: %s\n",
-                strerror(errno));
-        g_live.failed = 1;
-        pthread_mutex_unlock(&g_issue_lock);
-        return -1;
-    }
-    if (sent != EOK) {
-        fprintf(stderr, "source: the next node rejected a BACKGROUND batch "
-                "with status %ld\n", sent);
-        g_live.failed = 1;
-        pthread_mutex_unlock(&g_issue_lock);
-        return -1;
-    }
+    /*
+     * The numbers are on the issued list. Release the lock before the
+     * send, so the URGENT timer thread never waits for a batch to be
+     * admitted (D-060).
+     */
     pthread_mutex_unlock(&g_issue_lock);
+    sent = MsgSend(g_live.coid, &batch, sizeof batch, NULL, 0);
+    if (sent == -1 || sent != EOK) {
+        if (sent == -1) {
+            fprintf(stderr, "source: sending a BACKGROUND batch failed: %s\n",
+                    strerror(errno));
+        } else {
+            fprintf(stderr, "source: the next node rejected a BACKGROUND batch "
+                    "with status %ld\n", sent);
+        }
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return -1;
+    }
     for (i = 0; i < sent_n; i++) {
         printf("source: sent signal %" PRIu64 " class %s\n",
                batch.body[i].number, signal_class_name(SIGNAL_CLASS_BACKGROUND));
@@ -677,7 +699,7 @@ static void *flood_thread(void *arg)
         return NULL;
     }
     memset(&pause, 0, sizeof pause);
-    pause.tv_nsec = 20000000L;
+    pause.tv_nsec = 10000000L;
     for (;;) {
         int flood;
         int stop;
@@ -772,7 +794,12 @@ static int run_live(int argc, char **argv)
         return EXIT_FAILURE;
     }
     memset(&event, 0, sizeof event);
-    SIGEV_PULSE_INIT(&event, timer_coid, SIGEV_PULSE_PRIO_INHERIT,
+    /*
+     * The tick arrives at URGENT priority. At the inherited own priority
+     * (10) the timer thread never ran while BACKGROUND work at 12 kept
+     * CPU 0 busy, and URGENT stopped being issued (D-060).
+     */
+    SIGEV_PULSE_INIT(&event, timer_coid, SIGNAL_PRIO_URGENT,
                      _PULSE_CODE_MINAVAIL, 0);
     if (MsgRegisterEvent(&event, timer_coid) == -1) {
         fprintf(stderr, "source: registering the timer pulse failed: %s\n",
