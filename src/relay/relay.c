@@ -23,8 +23,13 @@
 _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
                "SIGNAL_MSG_TYPE is inside the reserved system message range");
 
-#define FIND_ATTEMPTS 40
-#define FIND_PAUSE_NS 50000000L
+/*
+ * A missed name_open used to wait 50 ms. The whole burst fits in that
+ * pause, so every URGENT in the burst paid it (D-055). 1 ms still
+ * covers about two seconds over FIND_ATTEMPTS.
+ */
+#define FIND_ATTEMPTS 2000
+#define FIND_PAUSE_NS 1000000L
 #define NAME_LIMIT 64
 
 struct relay {
