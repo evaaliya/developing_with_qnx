@@ -200,7 +200,56 @@ elif [ "$mode" = "source" ]; then
         exit 1
     fi
     echo "scenario: killing source pid $source_pid"
+    if [ ! -e /dev/signal-source ]; then
+        echo "scenario: /dev/signal-source is missing before the kill"
+        kill -KILL "$sup" >/dev/null 2>&1 || true
+        wait "$sup" >/dev/null 2>&1 || true
+        echo "--- supervisor ---"
+        cat /tmp/supervisor.out 2>/dev/null || true
+        echo "--- source ---"
+        cat /tmp/source.out 2>/dev/null || true
+        exit 1
+    fi
+    echo "scenario: path before kill"
+    ls -l /dev/signal-source
     kill -KILL "$source_pid"
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if [ ! -e /dev/signal-source ]; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    if [ -e /dev/signal-source ]; then
+        echo "scenario: /dev/signal-source stayed after the kill"
+        kill -KILL "$sup" >/dev/null 2>&1 || true
+        wait "$sup" >/dev/null 2>&1 || true
+        echo "--- supervisor ---"
+        cat /tmp/supervisor.out 2>/dev/null || true
+        exit 1
+    fi
+    echo "scenario: path gone after the kill"
+    i=0
+    while [ "$i" -lt 20 ]; do
+        if [ -e /dev/signal-source ]; then
+            echo "scenario: path after restart"
+            ls -l /dev/signal-source
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    if [ ! -e /dev/signal-source ]; then
+        echo "scenario: /dev/signal-source did not return after restart"
+        kill -KILL "$sup" >/dev/null 2>&1 || true
+        wait "$sup" >/dev/null 2>&1 || true
+        echo "--- supervisor ---"
+        cat /tmp/supervisor.out 2>/dev/null || true
+        echo "--- source ---"
+        cat /tmp/source.out 2>/dev/null || true
+        exit 1
+    fi
 else
     echo "scenario: killing relay-b pid $pid"
     kill -KILL "$pid"

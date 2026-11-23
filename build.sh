@@ -12,7 +12,7 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/sink \
     src/common/signal_ledger.c src/common/issued_log.c
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/source \
     src/source/source.c src/common/signal_msg.c src/common/issue_order.c \
-    src/common/issued_log.c
+    src/common/issued_log.c src/common/source_ctl.c
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/relay \
     src/relay/relay.c src/common/signal_msg.c src/common/signal_queue.c
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/supervisor \

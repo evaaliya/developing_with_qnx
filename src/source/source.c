@@ -5,6 +5,7 @@
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
+#include "source_ctl.h"
 #include "wire.h"
 
 #include <errno.h>
@@ -18,12 +19,29 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <sys/iofunc.h>
 #include <sys/dispatch.h>
 #include <sys/iomsg.h>
 #include <sys/neutrino.h>
+#include <sys/resmgr.h>
 
 _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
                "SIGNAL_MSG_TYPE is inside the reserved system message range");
+
+/* The device thread and the sender share this. D-053. */
+static struct source_control g_ctl;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static dispatch_t *g_dpp;
+
+static void ctl_lock(void)
+{
+    pthread_mutex_lock(&g_lock);
+}
+
+static void ctl_unlock(void)
+{
+    pthread_mutex_unlock(&g_lock);
+}
 
 /* Placeholder until a measured deadline is chosen. One local message fits. */
 #define DEMO_DEADLINE_NS 1000000000LL
@@ -202,6 +220,9 @@ static int send_recorded(int coid, struct signal_manifest *manifest,
         send_one(coid, *number, class_id) != 0) {
         return -1;
     }
+    ctl_lock();
+    source_ctl_note_issued(&g_ctl, class_id);
+    ctl_unlock();
     manifest->item[*recorded].number = *number;
     manifest->item[*recorded].class_id = class_id;
     (*recorded)++;
@@ -254,6 +275,466 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
     return 0;
 }
 
+static int send_manifest(int coid, struct signal_manifest *manifest,
+                         unsigned long recorded)
+{
+    long sent;
+
+    /*
+     * Drop below every class so the relay forward thread, still at its
+     * own priority until it dequeues, can run and drain the queue.
+     * The manifest is not a signal: it is forwarded before the previous
+     * node is answered, so a death in the middle cannot swallow the list.
+     */
+    if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
+        return -1;
+    }
+    manifest->count = (uint16_t)recorded;
+    alarm(MANIFEST_TIMEOUT_SECONDS);
+    sent = MsgSend(coid, manifest, sizeof *manifest, NULL, 0);
+    alarm(0);
+    if (sent == -1) {
+        fprintf(stderr, "source: sending the manifest failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    if (sent != EOK) {
+        fprintf(stderr,
+                "source: the next node rejected the manifest with status %ld\n",
+                sent);
+        return -1;
+    }
+    printf("source: sent manifest of %lu signals\n", recorded);
+    fflush(stdout);
+    return 0;
+}
+
+static int io_read(resmgr_context_t *ctp, io_read_t *msg, RESMGR_OCB_T *ocb)
+{
+    char text[512];
+    int status;
+    int n;
+    size_t offset;
+    size_t nbytes;
+
+    status = iofunc_read_verify(ctp, msg, ocb, NULL);
+    if (status != EOK) {
+        return status;
+    }
+    if ((msg->i.xtype & _IO_XTYPE_MASK) != _IO_XTYPE_NONE) {
+        return ENOSYS;
+    }
+    if (msg->i.nbytes == 0) {
+        _IO_SET_READ_NBYTES(ctp, 0);
+        return EOK;
+    }
+
+    ctl_lock();
+    n = source_ctl_status(&g_ctl, text, sizeof text);
+    ctl_unlock();
+    if (n < 0) {
+        return EIO;
+    }
+
+    offset = ocb->offset < 0 ? 0 : (size_t)ocb->offset;
+    if (offset >= (size_t)n) {
+        _IO_SET_READ_NBYTES(ctp, 0);
+        return EOK;
+    }
+    nbytes = (size_t)n - offset;
+    if (nbytes > msg->i.nbytes) {
+        nbytes = msg->i.nbytes;
+    }
+    if (MsgReply(ctp->rcvid, (long)nbytes, text + offset, nbytes) == -1) {
+        fprintf(stderr, "source: replying to a read of %s failed: %s\n",
+                SOURCE_DEV_PATH, strerror(errno));
+        return _RESMGR_NOREPLY;
+    }
+    ocb->offset += (off_t)nbytes;
+    return _RESMGR_NOREPLY;
+}
+
+static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
+{
+    char text[80];
+    size_t nbytes;
+    ssize_t got;
+    int status;
+
+    status = iofunc_write_verify(ctp, msg, ocb, NULL);
+    if (status != EOK) {
+        return status;
+    }
+    if ((msg->i.xtype & _IO_XTYPE_MASK) != _IO_XTYPE_NONE) {
+        return ENOSYS;
+    }
+    nbytes = msg->i.nbytes;
+    if (nbytes == 0 || nbytes >= sizeof text) {
+        ctl_lock();
+        snprintf(g_ctl.error, sizeof g_ctl.error,
+                 nbytes == 0 ? "unknown command" : "command too long");
+        ctl_unlock();
+        return EINVAL;
+    }
+    got = resmgr_msgread(ctp, text, nbytes, sizeof msg->i);
+    if (got < 0 || (size_t)got != nbytes) {
+        return errno != 0 ? errno : EIO;
+    }
+    text[nbytes] = '\0';
+
+    ctl_lock();
+    status = source_ctl_apply(&g_ctl, text);
+    ctl_unlock();
+    if (status != 0) {
+        return EINVAL;
+    }
+    _IO_SET_WRITE_NBYTES(ctp, nbytes);
+    return EOK;
+}
+
+static void *device_thread(void *arg)
+{
+    dispatch_context_t *ctp = arg;
+
+    (void)pin_cpu0();
+    for (;;) {
+        ctp = dispatch_block(ctp);
+        if (ctp == NULL) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "source: waiting on %s failed: %s\n",
+                    SOURCE_DEV_PATH, strerror(errno));
+            return NULL;
+        }
+        dispatch_handler(ctp);
+    }
+}
+
+static int start_device(void)
+{
+    static iofunc_attr_t dev_attr;
+    static resmgr_connect_funcs_t connect_funcs;
+    static resmgr_io_funcs_t io_funcs;
+    resmgr_attr_t resmgr_attr;
+    dispatch_context_t *ctp;
+    pthread_t thread;
+    int attempt;
+    int created;
+    int id = -1;
+
+    g_dpp = dispatch_create_channel(-1, DISPATCH_FLAG_NOLOCK);
+    if (g_dpp == NULL) {
+        fprintf(stderr, "source: creating the dispatch failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+
+    memset(&resmgr_attr, 0, sizeof resmgr_attr);
+    resmgr_attr.nparts_max = 1;
+    resmgr_attr.msg_max_size = 2048;
+    iofunc_func_init(_RESMGR_CONNECT_NFUNCS, &connect_funcs,
+                     _RESMGR_IO_NFUNCS, &io_funcs);
+    io_funcs.read = io_read;
+    io_funcs.write = io_write;
+    iofunc_attr_init(&dev_attr, S_IFNAM | 0666, 0, 0);
+
+    for (attempt = 0; attempt < FIND_ATTEMPTS; attempt++) {
+        id = resmgr_attach(g_dpp, &resmgr_attr, SOURCE_DEV_PATH, _FTYPE_ANY, 0,
+                           &connect_funcs, &io_funcs, &dev_attr);
+        if (id != -1) {
+            break;
+        }
+        if (errno != EBUSY && errno != EEXIST) {
+            break;
+        }
+        pause_gap(50);
+    }
+    if (id == -1) {
+        fprintf(stderr, "source: attaching %s failed: %s\n",
+                SOURCE_DEV_PATH, strerror(errno));
+        return -1;
+    }
+
+    ctp = dispatch_context_alloc(g_dpp);
+    if (ctp == NULL) {
+        fprintf(stderr, "source: allocating the dispatch context failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    created = pthread_create(&thread, NULL, device_thread, ctp);
+    if (created != 0) {
+        fprintf(stderr, "source: starting the %s thread failed: %s\n",
+                SOURCE_DEV_PATH, strerror(created));
+        return -1;
+    }
+    printf("source: path %s\n", SOURCE_DEV_PATH);
+    fflush(stdout);
+    return 0;
+}
+
+static int usage(void)
+{
+    fprintf(stderr,
+            "usage: source [-s seed] [-n start] <urgent-count> "
+            "<command-count> <background-count> <next-name> [gap-ms]\n"
+            "       source live <next-name>\n");
+    return EXIT_FAILURE;
+}
+
+static int issue_one(int coid, struct signal_manifest *manifest,
+                     unsigned long *recorded, uint64_t *number,
+                     uint32_t class_id, int *full)
+{
+    if (*full || *recorded >= SIGNAL_MANIFEST_CAP) {
+        if (!*full) {
+            fprintf(stderr, "source: the issued list is full; not sending more\n");
+            *full = 1;
+        }
+        return 0;
+    }
+    if (send_recorded(coid, manifest, recorded, number, class_id, 0) != 0) {
+        return -1;
+    }
+    return 1;
+}
+
+static int run_live(int argc, char **argv)
+{
+    struct signal_manifest manifest;
+    struct sigevent event;
+    struct itimerspec spec;
+    int64_t next_ns[3];
+    unsigned long recorded = 0;
+    uint64_t number = 1;
+    unsigned flood_sent = 0;
+    int coid;
+    int timer_chid;
+    int timer_coid;
+    timer_t ticker;
+    int ceiling;
+    int full = 0;
+    int failed = 0;
+    const char *next_name;
+
+    if (argc != 3 || argv[2][0] == '\0') {
+        return usage();
+    }
+    next_name = argv[2];
+    source_ctl_init(&g_ctl, 1);
+    if (install_alarm() != 0 || pin_cpu0() != 0) {
+        return EXIT_FAILURE;
+    }
+    ceiling = sched_get_priority_max(SCHED_FIFO);
+    if (ceiling < SIGNAL_PRIO_URGENT) {
+        fprintf(stderr,
+                "source: SCHED_FIFO ceiling %d is below the URGENT priority %d\n",
+                ceiling, SIGNAL_PRIO_URGENT);
+        return EXIT_FAILURE;
+    }
+    printf("source: SCHED_FIFO ceiling %d, live signals to %s\n",
+           ceiling, next_name);
+    fflush(stdout);
+    if (start_device() != 0) {
+        return EXIT_FAILURE;
+    }
+
+    coid = open_next(next_name);
+    if (coid == -1) {
+        return EXIT_FAILURE;
+    }
+
+    timer_chid = ChannelCreate(0);
+    if (timer_chid == -1) {
+        fprintf(stderr, "source: creating the timer channel failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    timer_coid = ConnectAttach(0, 0, timer_chid, _NTO_SIDE_CHANNEL, 0);
+    if (timer_coid == -1) {
+        fprintf(stderr, "source: attaching the timer channel failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    memset(&event, 0, sizeof event);
+    SIGEV_PULSE_INIT(&event, timer_coid, SIGEV_PULSE_PRIO_INHERIT,
+                     _PULSE_CODE_MINAVAIL, 0);
+    if (MsgRegisterEvent(&event, timer_coid) == -1) {
+        fprintf(stderr, "source: registering the timer pulse failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    if (timer_create(CLOCK_MONOTONIC, &event, &ticker) == -1) {
+        fprintf(stderr, "source: creating the timer failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    memset(&spec, 0, sizeof spec);
+    spec.it_value.tv_nsec = SOURCE_TICK_NS;
+    spec.it_interval.tv_nsec = SOURCE_TICK_NS;
+    if (timer_settime(ticker, 0, &spec, NULL) == -1) {
+        fprintf(stderr, "source: starting the timer failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    printf("source: timer pulse every %lld ns, URGENT %lld ns, "
+           "COMMAND %lld ns, BACKGROUND %lld ns\n",
+           (long long)SOURCE_TICK_NS,
+           (long long)SOURCE_URGENT_PERIOD_NS,
+           (long long)SOURCE_COMMAND_PERIOD_NS,
+           (long long)SOURCE_BACKGROUND_PERIOD_NS);
+    fflush(stdout);
+
+    memset(&manifest, 0, sizeof manifest);
+    manifest.type = SIGNAL_MSG_MANIFEST;
+    next_ns[0] = 0;
+    next_ns[1] = 0;
+    next_ns[2] = 0;
+
+    for (;;) {
+        struct _pulse pulse;
+        rcvid_t rcvid;
+        int stop;
+        int flood;
+        unsigned extras;
+        unsigned k;
+
+        ctl_lock();
+        stop = g_ctl.stop;
+        flood = g_ctl.flood;
+        ctl_unlock();
+        if (stop) {
+            break;
+        }
+        if (!flood) {
+            flood_sent = 0;
+        }
+        if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
+            failed = 1;
+            break;
+        }
+
+        rcvid = MsgReceive(timer_chid, &pulse, sizeof pulse, NULL);
+        if (rcvid == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "source: waiting for the timer failed: %s\n",
+                    strerror(errno));
+            failed = 1;
+            break;
+        }
+        if (rcvid != 0) {
+            if (MsgError(rcvid, ENOSYS) == -1) {
+                fprintf(stderr, "source: rejecting a timer-channel message failed: %s\n",
+                        strerror(errno));
+            }
+            continue;
+        }
+        if (pulse.code != _PULSE_CODE_MINAVAIL) {
+            continue;
+        }
+
+        ctl_lock();
+        stop = g_ctl.stop;
+        ctl_unlock();
+        if (stop) {
+            break;
+        }
+
+        if (!full) {
+            for (;;) {
+                uint32_t class_id;
+                int64_t now;
+
+                ctl_lock();
+                stop = g_ctl.stop;
+                ctl_unlock();
+                if (stop || full) {
+                    break;
+                }
+                now = monotonic_ns();
+                ctl_lock();
+                class_id = source_schedule_take(&g_ctl, now, next_ns);
+                ctl_unlock();
+                if (class_id == 0) {
+                    break;
+                }
+                {
+                    int issued = issue_one(coid, &manifest, &recorded, &number,
+                                           class_id, &full);
+
+                    if (issued < 0) {
+                        failed = 1;
+                        break;
+                    }
+                    if (issued == 0) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (failed) {
+            break;
+        }
+
+        ctl_lock();
+        stop = g_ctl.stop;
+        flood = g_ctl.flood;
+        extras = source_flood_burst(flood, flood_sent);
+        ctl_unlock();
+        if (stop) {
+            break;
+        }
+        for (k = 0; k < extras && !full && !failed; k++) {
+            ctl_lock();
+            stop = g_ctl.stop;
+            flood = g_ctl.flood;
+            ctl_unlock();
+            if (stop || !flood) {
+                break;
+            }
+            {
+                int issued = issue_one(coid, &manifest, &recorded, &number,
+                                       SIGNAL_CLASS_BACKGROUND, &full);
+
+                if (issued < 0) {
+                    failed = 1;
+                    break;
+                }
+                if (issued == 0) {
+                    break;
+                }
+            }
+            flood_sent++;
+        }
+    }
+
+    memset(&spec, 0, sizeof spec);
+    if (timer_settime(ticker, 0, &spec, NULL) == -1) {
+        fprintf(stderr, "source: stopping the timer failed: %s\n",
+                strerror(errno));
+        failed = 1;
+    }
+    if (send_manifest(coid, &manifest, recorded) != 0) {
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    if (name_close(coid) == -1) {
+        fprintf(stderr, "source: closing the connection to %s failed: %s\n",
+                next_name, strerror(errno));
+        return EXIT_FAILURE;
+    }
+    printf("source: sent %lu signals\n", recorded);
+    fflush(stdout);
+    return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv)
 {
     unsigned long urgent;
@@ -269,27 +750,26 @@ int main(int argc, char **argv)
     int have_seed = 0;
     int have_start = 0;
     uint32_t seed = 0;
+
+    if (argc >= 2 && strcmp(argv[1], "live") == 0) {
+        return run_live(argc, argv);
+    }
     uint32_t plan[SIGNAL_QUEUE_CAP];
     uint32_t planned = 0;
     uint32_t step;
     struct signal_manifest manifest;
     struct issued_item prior[SIGNAL_MANIFEST_CAP];
     unsigned prior_count = 0;
-    long sent;
 
     while (arg0 < argc && argv[arg0][0] == '-' && argv[arg0][1] != '\0') {
         unsigned long value;
 
         if (arg0 + 1 >= argc || parse_count(argv[arg0 + 1], &value) != 0) {
-            fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
-                    "<command-count> <background-count> <next-name> [gap-ms]\n");
-            return EXIT_FAILURE;
+            return usage();
         }
         if (strcmp(argv[arg0], "-s") == 0) {
             if (have_seed || value > UINT32_MAX) {
-                fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
-                        "<command-count> <background-count> <next-name> [gap-ms]\n");
-                return EXIT_FAILURE;
+                return usage();
             }
             have_seed = 1;
             seed = (uint32_t)value;
@@ -301,9 +781,7 @@ int main(int argc, char **argv)
             have_start = 1;
             number = value;
         } else {
-            fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
-                    "<command-count> <background-count> <next-name> [gap-ms]\n");
-            return EXIT_FAILURE;
+            return usage();
         }
         arg0 += 2;
     }
@@ -313,9 +791,7 @@ int main(int argc, char **argv)
         parse_count(argv[arg0 + 2], &background) != 0 ||
         argv[arg0 + 3][0] == '\0' ||
         (argc - arg0 == 5 && parse_count(argv[arg0 + 4], &gap_ms) != 0)) {
-        fprintf(stderr, "usage: source [-s seed] [-n start] <urgent-count> "
-                "<command-count> <background-count> <next-name> [gap-ms]\n");
-        return EXIT_FAILURE;
+        return usage();
     }
 
     if (urgent > SIGNAL_QUEUE_CAP || command > SIGNAL_QUEUE_CAP ||
@@ -349,6 +825,11 @@ int main(int argc, char **argv)
            "%lu BACKGROUND to %s\n",
            ceiling, urgent, command, background, argv[arg0 + 3]);
     fflush(stdout);
+
+    source_ctl_init(&g_ctl, 0);
+    if (start_device() != 0) {
+        return EXIT_FAILURE;
+    }
 
     coid = open_next(argv[arg0 + 3]);
     if (coid == -1) {
@@ -400,35 +881,10 @@ int main(int argc, char **argv)
         }
     }
 
-    /*
-     * Drop below every class so the relay forward thread, still at its
-     * own priority until it dequeues, can run and drain the queue.
-     * The manifest is not a signal: it is forwarded before the previous
-     * node is answered, so a death in the middle cannot swallow the list.
-     */
-    if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
+    if (send_manifest(coid, &manifest, recorded) != 0) {
         name_close(coid);
         return EXIT_FAILURE;
     }
-
-    manifest.count = (uint16_t)recorded;
-    alarm(MANIFEST_TIMEOUT_SECONDS);
-    sent = MsgSend(coid, &manifest, sizeof manifest, NULL, 0);
-    alarm(0);
-    if (sent == -1) {
-        fprintf(stderr, "source: sending the manifest failed: %s\n",
-                strerror(errno));
-        name_close(coid);
-        return EXIT_FAILURE;
-    }
-    if (sent != EOK) {
-        fprintf(stderr, "source: the next node rejected the manifest with status %ld\n",
-                sent);
-        name_close(coid);
-        return EXIT_FAILURE;
-    }
-    printf("source: sent manifest of %lu signals\n", recorded);
-    fflush(stdout);
 
     if (name_close(coid) == -1) {
         fprintf(stderr, "source: closing the connection to %s failed: %s\n",

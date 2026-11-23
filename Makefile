@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test run-kill run-lock run-stop run-source run-flood measure stall-check
+.PHONY: default all clean upload run test run-kill run-lock run-stop run-source run-flood run-dev measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -57,6 +57,8 @@ test: build/latency-report
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-fault \
 		tests/test_fault.c src/common/node_fault.c src/common/issued_log.c \
 		src/common/restart_limit.c src/common/signal_msg.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-source-ctl \
+		tests/test_source_ctl.c src/common/source_ctl.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
@@ -65,6 +67,7 @@ test: build/latency-report
 	./build/test-latency-stats
 	./build/test-issue-order
 	./build/test-fault
+	./build/test-source-ctl
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
 	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out
@@ -103,6 +106,10 @@ run-stop: upload
 
 run-source: upload
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/supervisor /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh source'
+
+run-dev: upload
+	$(SCP) ./scripts/qnx-dev.sh root@localhost:/tmp/qnx-dev.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-dev.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-dev.sh'
 
 measure: upload build/latency-report
 	mkdir -p build/measure
