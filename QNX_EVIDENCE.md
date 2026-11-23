@@ -1418,3 +1418,46 @@ The same run, from the host script and the guest supervisor log:
 - `SIGSTOP` of pid 44515358 for 1.5 s, then `SIGCONT`. Sink signal lines went from 16 to 26. URGENT late lines 0. SAFE lines 0. `kill -0` still succeeded while it was stopped. After continue, snapshot seq reached 9.
 - The host closed its TCP client. A new client received seq 13, state NORMAL.
 - After `echo stop` the final snapshot was seq 19, state NORMAL, mode normal. Counters matched the sink summary of that run: URGENT issued 13, on_time 13, late 0, lost 0, dropped 0; COMMAND 8, 8, 0, 0, 0; BACKGROUND 13, 13, 0, 0, 0. Guest supervisor exit 0. `sink: unaccounted 0`. No `LOCKED_SAFE`, no `restarted relay`, no `restarted source`.
+
+## 2026-11-23 23:21 +06 · host panel, and S4 with the panel and telemetry killed
+
+Guest before the panel runs, and again at 23:25 +06 after every later run:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+The panel is the Ruby that ships with macOS. From a checkout of this repository:
+
+```text
+/usr/bin/ruby scripts/host-panel.rb
+```
+
+It reads telemetry text from `localhost:8000` and serves the page at `127.0.0.1:8765`. No extra packages. A snapshot 2 seconds old or older is shown as stale, with its age, and the old counters are hidden.
+
+### Screenshot during run-kill
+
+`evidence/panel-run-kill.png` is a Quick Look render of `evidence/panel-run-kill.html`. That HTML is the page the panel froze at `GET /safe` while `make run-kill` was in SAFE (23:15 +06). The live browser capture timed out, so this file is the rendered page, not a photograph of the window. The page shows state SAFE, relay B restarts 1, source mode normal, and the six state colours.
+
+The panel log for the same run, 23:14:29–23:14:30 +06:
+
+```text
+panel-watch current state SAFE mode normal relay-b-restarts 0 age 0
+panel-watch current state SAFE mode normal relay-b-restarts 1 age 0
+panel-watch current state RECOVERING mode normal relay-b-restarts 1 age 0
+panel-watch current state NORMAL mode normal relay-b-restarts 1 age 0
+```
+
+During `run-dev` the same log shows `NORMAL mode flood` at 23:18:46 and `NORMAL mode mute` at 23:18:48.
+
+### S4, two live runs of 10 seconds
+
+Both commands were `scripts/qnx-s4.sh 10`. Each printed `s4: live seconds 10` and then `s4: stop`. Shell exit code 0 for both. `sink: unaccounted 0` in both. URGENT, COMMAND, and BACKGROUND each had late 0, lost 0, dropped 0.
+
+| Run | URGENT on time / (on time + late + lost + dropped) | R1 | URGENT total median | URGENT total max | n |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Calm, panel left running | 20/20 | 1 | 2674504 ns | 4786000 ns | 20 |
+| Panel process killed and telemetry sent SIGKILL 5 s after `s4: live` | 20/20 | 1 | 2452000 ns | 5358992 ns | 20 |
+| Difference, fault minus calm | 0 | 0 | −222504 ns | +572992 ns | 0 |
+
+p99 is `n/a` in both: the report needs at least 100 samples, and each run has 20. The fault log contains `supervisor: restarted telemetry pid=81137686`. COMMAND received 13 on time in both. BACKGROUND received 20 on time in both.
