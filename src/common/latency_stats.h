@@ -14,7 +14,13 @@
 
 #include <stdint.h>
 
+/*
+ * The guest keeps small windows. The host report reads a whole flooded
+ * run and builds with a larger cap (D-060).
+ */
+#ifndef LATENCY_STATS_CAP
 #define LATENCY_STATS_CAP 4096
+#endif
 #define LATENCY_STATS_P99_MIN 100
 
 struct latency_sample {

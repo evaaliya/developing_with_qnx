@@ -12,7 +12,7 @@
 
 #include <stdint.h>
 
-#define SIGNAL_LEDGER_CAP 3072
+#define SIGNAL_LEDGER_CAP 12288
 
 enum signal_account {
     SIGNAL_ACCOUNT_NONE = 0,

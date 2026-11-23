@@ -30,7 +30,7 @@
  * Live S1 needs at least 100 URGENT (20 ms period, 5 s window) plus
  * COMMAND, ordinary BACKGROUND, and the flood batches (D-059).
  */
-#define SIGNAL_MANIFEST_CAP 3072
+#define SIGNAL_MANIFEST_CAP 12288
 
 /* Larger than the ordinary relay queue, so one batch overflows it. */
 #define SIGNAL_BATCH_MAX 72

@@ -22,13 +22,13 @@
 #define SOURCE_TICK_NS 10000000LL
 
 /*
- * One batch, repeated for as long as flood stays on (D-059).
- * 72 is larger than the ordinary queue of 64, so each batch overflows
- * it. Every 200 ms across a 5 s window stays inside the ledger and
- * still reaches the end of the window (D-059).
+ * One batch, repeated for as long as flood stays on (D-059, D-060).
+ * 72 is larger than the ordinary queue of 64. A batch every 50 ms is
+ * 1440 BACKGROUND a second, faster than the relay chain forwards them,
+ * so the queue does not drain between batches (D-060).
  * The counted burst does not use this.
  */
-#define SOURCE_FLOOD_PERIOD_NS 200000000LL
+#define SOURCE_FLOOD_PERIOD_NS 50000000LL
 #define SOURCE_FLOOD_BATCH 72u
 
 struct source_control {

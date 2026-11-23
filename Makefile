@@ -15,7 +15,7 @@ SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
 	mkdir -p build
-	cc -std=c11 -Wall -Wextra -Werror -I src/common -o $@ \
+	cc -std=c11 -Wall -Wextra -Werror -DLATENCY_STATS_CAP=32768 -I src/common -o $@ \
 		src/latency-report/latency_report.c src/common/latency_stats.c
 
 CHAIN_URGENT := 3
