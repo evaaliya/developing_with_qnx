@@ -1377,3 +1377,44 @@ nrw-rw-rw-  1 root root 0 2026-11-23 14:42 /dev/signal-source
 | Source stops issuing URGENT and stays alive. `make run-dev`, 2026-11-23 20:41:03–20:41:16 +06, exit 0. Source pid 26177560 was alive at SAFE and after the bad command | yes, `sink: state SAFE` | NORMAL after `restore`, then DEGRADED when the manifest counted 3 dropped BACKGROUND | 0 | 0 | 0 |
 
 `make measure` N=34, 20:42:26–20:43:04 +06, exit 0. 68 logs, each `sink: unaccounted 0`. R5 violations: calm relay A 0, relay B 0, flood relay A 0, relay B 0, sum 0. URGENT total median under flood 701008 ns (0.701008 ms).
+
+## 2026-11-23 22:10:45 +06 · telemetry on the guest, TCP 8000
+
+Guest at the start of `scripts/qnx-telemetry.sh`, and again after every later run the same evening (`ssh` at 22:26 +06):
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+`qconn` on this image already listens on TCP 8000. The scenario sends it `SIGKILL` before the supervisor starts. `slay` without `-s SIGKILL` delivers `SIGTERM`, which this `qconn` ignores. The supervisor then starts `/tmp/telemetry`, which binds `0.0.0.0:8000` and UDP `127.0.0.1:8001`.
+
+Command from `project-kit`:
+
+```text
+make run-telemetry
+```
+
+Exit code 0. The host script reads `localhost:8000` (QEMU hostfwd). One snapshot from that run, file time 22:10:45 +06:
+
+```text
+seq 13
+time_ns 78103078356000
+state NORMAL
+source_mode normal
+node source alive 1 restarts 0
+node relay-a alive 1 restarts 0
+node relay-b alive 1 restarts 0
+node sink alive 1 restarts 0
+class URGENT issued 12 on_time 12 late 0 lost 0 dropped 0 median_ns 632008 max_ns 4764000
+class COMMAND issued 8 on_time 8 late 0 lost 0 dropped 0 median_ns 1079496 max_ns 3991008
+class BACKGROUND issued 12 on_time 12 late 0 lost 0 dropped 0 median_ns 1323000 max_ns 9860000
+end
+```
+
+The same run, from the host script and the guest supervisor log:
+
+- First snapshot that was already NORMAL, mode normal, every node alive: seq 4, URGENT on_time 1. `cat /dev/signal-source` contained `mode normal`.
+- `kill -KILL` of telemetry pid 44277781. Supervisor printed `telemetry is not a network node, K unchanged` and `supervisor: restarted telemetry pid=44515358`. The next snapshot was seq 1 of the new process, URGENT on_time 5. No `sink: state SAFE`.
+- `SIGSTOP` of pid 44515358 for 1.5 s, then `SIGCONT`. Sink signal lines went from 16 to 26. URGENT late lines 0. SAFE lines 0. `kill -0` still succeeded while it was stopped. After continue, snapshot seq reached 9.
+- The host closed its TCP client. A new client received seq 13, state NORMAL.
+- After `echo stop` the final snapshot was seq 19, state NORMAL, mode normal. Counters matched the sink summary of that run: URGENT issued 13, on_time 13, late 0, lost 0, dropped 0; COMMAND 8, 8, 0, 0, 0; BACKGROUND 13, 13, 0, 0, 0. Guest supervisor exit 0. `sink: unaccounted 0`. No `LOCKED_SAFE`, no `restarted relay`, no `restarted source`.
