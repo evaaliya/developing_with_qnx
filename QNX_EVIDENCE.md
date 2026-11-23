@@ -1547,3 +1547,69 @@ S4 | R10 | R1 S1 9/9 S4 9/9; R3 URGENT median delta -548000 ns; max delta -12739
 S4 | checks | panel and telemetry killed during a 4 s window | прошёл
 scenarios failed 0
 ```
+
+## 2026-11-24 01:40 +06 · class deadlines and a flood that drops
+
+Class deadlines were set before this run, from the largest calm full latency in the B18 and B19 live windows, doubled and rounded up to 1 ms, then raised so each looser class is at least twice the previous one (D-058). Stall runs are not in that set.
+
+| Class | Largest calm full latency | Deadline |
+| --- | --- | --- |
+| URGENT | 15233008 ns, S1 in B19 | 31000000 ns (31 ms) |
+| COMMAND | 8442000 ns, S1 in B19 | 62000000 ns (62 ms) |
+| BACKGROUND | 9860000 ns, B18 telemetry snapshot | 124000000 ns (124 ms) |
+
+The live flood is one `SIGNAL_MSG_BATCH` of 72 BACKGROUND signals every 200 ms for the whole window. The relay queue stays 64, the same size as S1 and a calm `make measure`. 72 does not fit, so BACKGROUND is dropped. The counted `make measure` burst and its queue of 8 are unchanged.
+
+Command, from this checkout:
+
+```text
+make scenarios
+```
+
+It ran from 01:39:20 to 01:40:24 +06. Exit code 0. `scenarios failed 0`.
+
+Guest after this run, at 01:40:24 +06:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
+
+Table printed by that command. Every number is from this run. A cell says `порога нет` when no threshold is recorded for that requirement, and that cell is not a pass.
+
+```text
+scenario | requirement | numbers | verdict
+S1 | R1 | URGENT on time 197/197; threshold 1 and n >= 100 | прошёл
+S1 | R3 | URGENT n 197 median 2214992 ns p99 24157008 ns max 27468992 ns; COMMAND n 7 median 3350000 ns p99 n/a max 12167008 ns; BACKGROUND n 11 median 2294992 ns p99 n/a max 4720000 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 197 COMMAND 7 BACKGROUND 11; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 159/159 against S1 197/197; threshold 1 and n >= 100 | прошёл
+S2 | R2 median | URGENT median 737008 ns; S1 median 2214992 ns; threshold 2x S1 4429984 ns; p99 2644000 ns; max 2934000 ns; deadline 31000000 ns; n 159 | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 200; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 0; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 1811; flood signals 1800; window ms 5000; duration ns 5045154992; span ns 4963876992; drop thirds 72/64/64 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2101946000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 3192704992 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 197/197 S4 197/197; R3 URGENT median delta -154992 ns; max delta -21859984 ns; S4 median 2060000 ns max 5609008 ns; threshold fraction equal, |median delta| <= 5000000 ns, |max delta| <= 31000000 ns | прошёл
+S4 | checks | panel and telemetry killed during a 5 s window | прошёл
+scenarios failed 0
+```
+
+S1 against S2, same run, full latency in nanoseconds.
+
+| | S1 calm | S2 flood |
+| --- | --- | --- |
+| URGENT on time | 197/197 | 159/159 |
+| URGENT n, median, p99, max | 197, 2214992, 24157008, 27468992 | 159, 737008, 2644000, 2934000 |
+| BACKGROUND on time | 11/11 | 1611/1611 |
+| BACKGROUND n, median, max | 11, 2294992, 4720000 | 1611, 52047008, 84016000 |
+| BACKGROUND dropped | 0 | 200, thirds 72/64/64 |
+| unaccounted | 0 | 0 |
+
+R1, the R2 share, the R2 median, and R10 passed on the thresholds above. The BACKGROUND median and maximum under the flood are higher than in S1. Every delivered BACKGROUND was still inside the 124 ms deadline.
