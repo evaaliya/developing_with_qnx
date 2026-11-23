@@ -73,6 +73,7 @@ test: build/latency-report
 	./build/test-fault
 	./build/test-source-ctl
 	./build/test-telemetry
+	/usr/bin/ruby tests/test_panel.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
 	diff -u tests/fixtures/sink-latency.expected build/sink-latency.out

@@ -4,6 +4,7 @@ set -eu
 
 fail() {
     echo "scenario: $1" >&2
+    slay -Q -f telemetry >/dev/null 2>&1 || true
     slay -Q -f source >/dev/null 2>&1 || true
     slay -Q -f relay >/dev/null 2>&1 || true
     slay -Q -f sink >/dev/null 2>&1 || true
@@ -32,7 +33,22 @@ slay -Q -f telemetry >/dev/null 2>&1 || true
 slay -Q -f source >/dev/null 2>&1 || true
 slay -Q -f relay >/dev/null 2>&1 || true
 slay -Q -f sink >/dev/null 2>&1 || true
-rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out /tmp/dev-status.txt /tmp/bad-command.err
+# qconn keeps TCP 8000 (F-026). The panel reads telemetry on that port.
+slay -Q -f -s SIGKILL qconn >/dev/null 2>&1 || true
+i=0
+while [ "$i" -lt 20 ]; do
+    if ! netstat -an | grep -q '[*][.]8000'; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 0.1
+done
+rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out \
+    /tmp/dev-status.txt /tmp/bad-command.err /tmp/telemetry.out
+
+SIGNAL_TELEMETRY=1
+export SIGNAL_TELEMETRY
+/tmp/telemetry > /tmp/telemetry.out 2>&1 &
 
 /tmp/sink 64 1500 > /tmp/sink.out 2>&1 &
 sink_pid=$!
@@ -89,6 +105,10 @@ done
 if ! grep 'dropped signal' /tmp/relay-a.out >/dev/null 2>&1; then
     fail "flood dropped nothing"
 fi
+# Telemetry emits at most every 50 ms. Without this pause the flood
+# report and flood off can land in one snapshot, and the panel never
+# shows flood.
+sleep 0.3
 if grep 'dropped signal' /tmp/relay-a.out | grep -v 'class BACKGROUND' >/dev/null 2>&1; then
     fail "a dropped signal during flood was not BACKGROUND"
 fi
@@ -196,6 +216,7 @@ source_status=$?
 wait "$sink_pid"
 sink_status=$?
 slay -Q -f relay >/dev/null 2>&1 || true
+slay -Q -f telemetry >/dev/null 2>&1 || true
 wait "$relay_a" >/dev/null 2>&1 || true
 wait "$relay_b" >/dev/null 2>&1 || true
 set -e
