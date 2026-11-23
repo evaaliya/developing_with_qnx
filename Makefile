@@ -7,8 +7,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 # The container mounts the Mac home directory at /home/$(USER).
 PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 
-SSH := ssh -p 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
-SCP := scp -P 2222 -i $(HOME)/.ssh/id_ed25519 -o BatchMode=yes
+SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
+SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
 .PHONY: default all clean upload run test run-kill run-lock run-stop run-source run-flood measure stall-check
 
