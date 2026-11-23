@@ -65,7 +65,7 @@ static int parse_send_line(const char *line, const char *end,
 int issued_list_parse(const char *text, struct issued_item *items,
                       unsigned cap, unsigned *count, uint64_t *max_number)
 {
-    struct issued_item local[SIGNAL_LEDGER_CAP];
+    static struct issued_item local[SIGNAL_LEDGER_CAP];
     unsigned local_count = 0;
     uint64_t max_seen = 0;
     const char *p;

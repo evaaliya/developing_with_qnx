@@ -50,6 +50,26 @@ int main(void)
     expect("zero deadline, at the issue instant", signal_check(&sig, 1000),
            SIGNAL_ON_TIME);
 
+    if (signal_class_deadline_ns(SIGNAL_CLASS_URGENT) !=
+            SIGNAL_DEADLINE_URGENT_NS ||
+        signal_class_deadline_ns(SIGNAL_CLASS_COMMAND) !=
+            SIGNAL_DEADLINE_COMMAND_NS ||
+        signal_class_deadline_ns(SIGNAL_CLASS_BACKGROUND) !=
+            SIGNAL_DEADLINE_BACKGROUND_NS ||
+        signal_class_deadline_ns(0) != -1) {
+        printf("FAIL class deadlines\n");
+        failures++;
+    } else if (!(SIGNAL_DEADLINE_URGENT_NS < SIGNAL_DEADLINE_COMMAND_NS &&
+                 SIGNAL_DEADLINE_COMMAND_NS < SIGNAL_DEADLINE_BACKGROUND_NS &&
+                 SIGNAL_DEADLINE_COMMAND_NS >= 2 * SIGNAL_DEADLINE_URGENT_NS &&
+                 SIGNAL_DEADLINE_BACKGROUND_NS >=
+                     2 * SIGNAL_DEADLINE_COMMAND_NS)) {
+        printf("FAIL deadline order\n");
+        failures++;
+    } else {
+        printf("PASS class deadlines\n");
+    }
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

@@ -10,6 +10,11 @@ NONE = "порога нет".freeze
 # D-051 (r): R5 violations across the 34+34 measure. Applied as written.
 R5_MAX = 31
 
+# D-058 deadlines and the R1, R2, R10 thresholds fixed before the B20 run.
+URGENT_DEADLINE_NS = 31_000_000
+R1_MIN_N = 100
+R10_MEDIAN_DELTA_NS = 5_000_000
+
 class ScenarioReport
   def self.run(paths)
     new(paths).run
@@ -152,6 +157,46 @@ class ScenarioReport
     "#{row[:on_time]}/#{den}"
   end
 
+  def all_on_time?(row)
+    !row.nil? && accounted(row) >= R1_MIN_N && row[:on_time] == accounted(row)
+  end
+
+  def p99_ns(item)
+    return nil if item.nil?
+    text = item[:p99].to_s
+    return nil if text == "n/a"
+    match = text.match(/\A(-?\d+) ns\z/)
+    return nil if match.nil?
+    match[1].to_i
+  end
+
+  def drop_times(text)
+    text.scan(/dropped signal \d+ class BACKGROUND at (\d+) ns/).flatten.map(&:to_i)
+  end
+
+  # Counts of BACKGROUND drops in the first, middle, and last third of
+  # the span from the earliest drop to the latest. nil when the span
+  # does not cover three separated thirds.
+  def drop_thirds(times)
+    return nil if times.nil? || times.length < 3
+    ordered = times.sort
+    span = ordered.last - ordered.first
+    return nil if span <= 0
+    first_end = ordered.first + span / 3
+    second_end = ordered.first + (2 * span) / 3
+    counts = [0, 0, 0]
+    ordered.each do |stamp|
+      if stamp < first_end
+        counts[0] += 1
+      elsif stamp < second_end
+        counts[1] += 1
+      else
+        counts[2] += 1
+      end
+    end
+    counts
+  end
+
   # INIT before the first NORMAL is the machine starting. Anything
   # after that first NORMAL, other than NORMAL, left the calm state.
   def stayed_normal?(text)
@@ -175,7 +220,10 @@ class ScenarioReport
     urgent = sums["URGENT"]
     den = accounted(urgent)
     share = den == 0 ? "missing" : "#{urgent[:on_time]}/#{den}"
-    add("S1", "R1", "URGENT on time #{share}", NONE)
+    verdict = all_on_time?(urgent) ? PASS : FAIL
+    add("S1", "R1",
+        "URGENT on time #{share}; threshold 1 and n >= #{R1_MIN_N}",
+        verdict)
 
     detail = %w[URGENT COMMAND BACKGROUND].map do |name|
       item = series(latency_text, name)
@@ -220,22 +268,31 @@ class ScenarioReport
     flood_urgent = series(latency_text, "URGENT")
     calm_share = fraction_text(summaries(calm)["URGENT"])
     flood_share = fraction_text(summaries(text)["URGENT"])
+    share_ok = all_on_time?(summaries(text)["URGENT"]) &&
+               all_on_time?(summaries(calm)["URGENT"])
     add("S2", "R2 share",
-        "URGENT on time flood #{flood_share} against S1 #{calm_share}",
-        NONE)
+        "URGENT on time flood #{flood_share} against S1 #{calm_share}; " \
+        "threshold 1 and n >= #{R1_MIN_N}",
+        share_ok ? PASS : FAIL)
 
     if flood_urgent.nil? || calm_urgent.nil?
       add("S2", "R2 median", "median missing", FAIL)
     else
       limit_2x = calm_urgent[:median] * 2
-      ok = flood_urgent[:median] <= limit_2x
+      p99 = p99_ns(flood_urgent)
+      ok = flood_urgent[:median] <= limit_2x &&
+           flood_urgent[:n] >= R1_MIN_N &&
+           !p99.nil? && p99 <= URGENT_DEADLINE_NS &&
+           flood_urgent[:max] <= URGENT_DEADLINE_NS
       if !@r2_max.nil? && flood_urgent[:median] > @r2_max
         ok = false
       end
       extra = @r2_max.nil? ? "" : "; threshold #{@r2_max} ns"
       add("S2", "R2 median",
           "URGENT median #{flood_urgent[:median]} ns; S1 median #{calm_urgent[:median]} ns" \
-          "#{extra}; threshold 2x S1 #{limit_2x} ns",
+          "#{extra}; threshold 2x S1 #{limit_2x} ns; " \
+          "p99 #{flood_urgent[:p99]}; max #{flood_urgent[:max]} ns; " \
+          "deadline #{URGENT_DEADLINE_NS} ns; n #{flood_urgent[:n]}",
           ok ? PASS : FAIL)
     end
 
@@ -289,9 +346,15 @@ class ScenarioReport
     problems << "window duration missing or outside the sleep" unless duration_ok
     problems << "no BACKGROUND issued" if issued == 0
     problems << "guest exit #{exit_code}" if exit_code && exit_code != 0
+    thirds = drop_thirds(drop_times(text))
+    if thirds.nil? || thirds.any? { |count| count <= 0 }
+      problems << "BACKGROUND drops do not cover the three thirds"
+    end
+    problems << "sink was not DEGRADED during the flood" unless text.include?("sink: state DEGRADED")
     numbers = "BACKGROUND issued #{issued}; flood signals #{times.length}; " \
               "window ms #{window_ms || 'missing'}; " \
-              "duration ns #{duration || 'missing'}; span ns #{span || 'missing'}"
+              "duration ns #{duration || 'missing'}; span ns #{span || 'missing'}; " \
+              "drop thirds #{thirds ? thirds.join('/') : 'missing'}"
     numbers += "; #{problems.join('; ')}" unless problems.empty?
     add("S2", "checks", numbers, problems.empty? ? PASS : FAIL)
   end
@@ -379,15 +442,22 @@ class ScenarioReport
     fault_row = summaries(text)["URGENT"]
     calm_lat = series(calm_latency, "URGENT")
     fault_lat = series(latency_text, "URGENT")
-    if calm_lat.nil? || fault_lat.nil?
-      add("S4", "R10", "median missing", NONE)
+    if calm_lat.nil? || fault_lat.nil? || calm_row.nil? || fault_row.nil?
+      add("S4", "R10", "median missing", FAIL)
     else
+      median_delta = fault_lat[:median] - calm_lat[:median]
+      max_delta = fault_lat[:max] - calm_lat[:max]
+      ok = all_on_time?(calm_row) && all_on_time?(fault_row) &&
+           median_delta.abs <= R10_MEDIAN_DELTA_NS &&
+           max_delta.abs <= URGENT_DEADLINE_NS
       add("S4", "R10",
           "R1 S1 #{fraction_text(calm_row)} S4 #{fraction_text(fault_row)}; " \
-          "R3 URGENT median delta #{fault_lat[:median] - calm_lat[:median]} ns; " \
-          "max delta #{fault_lat[:max] - calm_lat[:max]} ns; " \
-          "S4 median #{fault_lat[:median]} ns max #{fault_lat[:max]} ns",
-          NONE)
+          "R3 URGENT median delta #{median_delta} ns; " \
+          "max delta #{max_delta} ns; " \
+          "S4 median #{fault_lat[:median]} ns max #{fault_lat[:max]} ns; " \
+          "threshold fraction equal, |median delta| <= #{R10_MEDIAN_DELTA_NS} ns, " \
+          "|max delta| <= #{URGENT_DEADLINE_NS} ns",
+          ok ? PASS : FAIL)
     end
 
     problems = []

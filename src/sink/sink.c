@@ -104,6 +104,7 @@ struct receive_buffer {
         struct signal_message message;
         struct signal_manifest manifest;
         struct signal_lock lock;
+        struct signal_dropped dropped;
     } body;
 };
 
@@ -306,9 +307,9 @@ static int arm_receive(uint64_t gap_ns)
 int main(int argc, char **argv)
 {
     name_attach_t *attach;
-    struct signal_ledger ledger;
+    static struct signal_ledger ledger;
     struct net_machine machine;
-    struct receive_buffer buffer;
+    static struct receive_buffer buffer;
     enum net_state shown = NET_LOCKED_SAFE;
     unsigned long expected;
     unsigned long gap_ms = DEFAULT_GAP_MS;
@@ -436,6 +437,21 @@ int main(int argc, char **argv)
                 detach(attach);
                 return EXIT_FAILURE;
             }
+            continue;
+        }
+
+        if (buffer.body.message.type == SIGNAL_MSG_DROPPED &&
+            info.msglen >= (ssize_t)sizeof(struct signal_dropped)) {
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "sink: replying to a drop notice failed: %s\n",
+                        strerror(errno));
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            show_state(&shown,
+                       net_machine_on_dropped(&machine,
+                                              buffer.body.dropped.class_id));
             continue;
         }
 

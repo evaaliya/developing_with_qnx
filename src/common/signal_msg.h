@@ -38,7 +38,20 @@ struct signal {
  * boundary. A zero deadline is on time only at the issue instant.
  * A negative deadline is late. A NULL signal is late.
  */
+/*
+ * Class deadlines from calm live runs in B18 and B19 (D-058).
+ * Twice the largest calm full latency of that class, rounded up to
+ * 1 ms, then raised so URGENT <= COMMAND <= BACKGROUND and each
+ * looser class is at least twice the previous one.
+ */
+#define SIGNAL_DEADLINE_URGENT_NS 31000000LL
+#define SIGNAL_DEADLINE_COMMAND_NS 62000000LL
+#define SIGNAL_DEADLINE_BACKGROUND_NS 124000000LL
+
 enum signal_verdict signal_check(const struct signal *sig, int64_t now_ns);
+
+/* The deadline for one of the three classes. -1 when class_id is not. */
+int64_t signal_class_deadline_ns(uint32_t class_id);
 
 const char *signal_class_name(uint32_t class_id);
 const char *signal_verdict_name(enum signal_verdict verdict);

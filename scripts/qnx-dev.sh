@@ -54,7 +54,7 @@ export SIGNAL_TELEMETRY
 sink_pid=$!
 /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
 relay_b=$!
-/tmp/relay signal-relay-a signal-relay-b -q 4 > /tmp/relay-a.out 2>&1 &
+/tmp/relay signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 &
 relay_a=$!
 /tmp/source live signal-relay-a > /tmp/source.out 2>&1 &
 source_pid=$!
@@ -94,13 +94,14 @@ show_status "cat during flood"
 grep '^mode flood$' /tmp/dev-status.txt >/dev/null
 grep '^flood on$' /tmp/dev-status.txt >/dev/null
 
-# One reply at a time: the forward thread empties a queue of 4 before
-# the next message arrives, so a live flood may drop nothing. A counted
-# pack (make run-flood) still overflows. Wait long enough for the first
-# burst and one short follow-up, and for one telemetry snapshot.
+# A live batch is larger than the ordinary queue, so BACKGROUND has to
+# be dropped. The counted pack still overflows on its own.
 sleep 0.6
 drops=$(grep -c 'dropped signal' /tmp/relay-a.out 2>/dev/null || true)
 echo "scenario: flood drops ${drops:-0}"
+if [ "${drops:-0}" -eq 0 ]; then
+    fail "live flood dropped nothing"
+fi
 if grep 'dropped signal' /tmp/relay-a.out | grep -v 'class BACKGROUND' >/dev/null 2>&1; then
     fail "a dropped signal during flood was not BACKGROUND"
 fi

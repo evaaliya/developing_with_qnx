@@ -193,23 +193,14 @@ uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
     return 0;
 }
 
-unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns,
-                          unsigned already)
+unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns)
 {
-    unsigned burst;
-    unsigned room;
-
-    if (!flood || next_ns == NULL || already >= SOURCE_FLOOD_CAP) {
+    if (!flood || next_ns == NULL) {
         return 0;
     }
     if (now_ns < *next_ns) {
         return 0;
     }
     *next_ns = add_period(now_ns, SOURCE_FLOOD_PERIOD_NS);
-    burst = already == 0 ? SOURCE_FLOOD_FIRST : SOURCE_FLOOD_BURST;
-    room = SOURCE_FLOOD_CAP - already;
-    if (room > burst) {
-        return burst;
-    }
-    return room;
+    return SOURCE_FLOOD_BATCH;
 }

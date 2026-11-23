@@ -14,21 +14,22 @@
 #define SOURCE_DEV_PATH "/dev/signal-source"
 
 /* Class periods for live mode. The counted burst does not use them. */
-#define SOURCE_URGENT_PERIOD_NS 500000000LL
+#define SOURCE_URGENT_PERIOD_NS 20000000LL
 #define SOURCE_COMMAND_PERIOD_NS 800000000LL
 #define SOURCE_BACKGROUND_PERIOD_NS 500000000LL
 
 /* One timer wakes the live source this often. */
 #define SOURCE_TICK_NS 10000000LL
 
-/* The first episode is long enough that a queue of 4 falls behind.
- * Later episodes stay small so the flood lasts the scenario window
- * without filling the 64-slot ledger (D-057). The counted burst does
- * not use these. */
-#define SOURCE_FLOOD_PERIOD_NS 500000000LL
-#define SOURCE_FLOOD_FIRST 24u
-#define SOURCE_FLOOD_BURST 4u
-#define SOURCE_FLOOD_CAP 40u
+/*
+ * One batch, repeated for as long as flood stays on (D-059).
+ * 72 is larger than the ordinary queue of 64, so each batch overflows
+ * it. Every 200 ms across a 5 s window stays inside the ledger and
+ * still reaches the end of the window (D-059).
+ * The counted burst does not use this.
+ */
+#define SOURCE_FLOOD_PERIOD_NS 200000000LL
+#define SOURCE_FLOOD_BATCH 72u
 
 struct source_control {
     int live;
@@ -61,10 +62,10 @@ int source_ctl_status(const struct source_control *ctl, char *buf, size_t cap);
 uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
                               int64_t next_ns[3]);
 
-/* Extra BACKGROUND sends due at now_ns. 0 when flood is off, the clock
- * is missing, the period has not elapsed, or the episode cap is already
- * reached. When a burst is due, *next_ns becomes now_ns plus the period. */
-unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns,
-                          unsigned already);
+/* BACKGROUND signals to put in the next batch. 0 when flood is off,
+ * the clock is missing, or the period has not elapsed. When a batch is
+ * due, *next_ns becomes now_ns plus the period. There is no episode cap:
+ * flood stays on until the caller turns it off (D-059). */
+unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns);
 
 #endif

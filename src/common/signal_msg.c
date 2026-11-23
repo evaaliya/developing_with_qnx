@@ -23,6 +23,20 @@ enum signal_verdict signal_check(const struct signal *sig, int64_t now_ns)
     return SIGNAL_LATE;
 }
 
+int64_t signal_class_deadline_ns(uint32_t class_id)
+{
+    switch (class_id) {
+    case SIGNAL_CLASS_URGENT:
+        return SIGNAL_DEADLINE_URGENT_NS;
+    case SIGNAL_CLASS_COMMAND:
+        return SIGNAL_DEADLINE_COMMAND_NS;
+    case SIGNAL_CLASS_BACKGROUND:
+        return SIGNAL_DEADLINE_BACKGROUND_NS;
+    default:
+        return -1;
+    }
+}
+
 const char *signal_class_name(uint32_t class_id)
 {
     switch (class_id) {

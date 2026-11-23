@@ -32,7 +32,7 @@ run_guest() {
     echo "$label guest exit $status"
 }
 
-run_guest s1 "/tmp/qnx-s4.sh 4"
+run_guest s1 "/tmp/qnx-s4.sh 5"
 run_guest s2 /tmp/qnx-s2.sh
 run_guest s3 /tmp/qnx-s3.sh
 
@@ -41,7 +41,7 @@ echo "=== s4 ==="
     --log="$out/panel-s4.log" >/dev/null 2>&1 &
 panel_pid=$!
 set +e
-"${ssh[@]}" root@localhost "$guest_setup; /tmp/qnx-s4.sh 4" > "$out/s4.log" &
+"${ssh[@]}" root@localhost "$guest_setup; /tmp/qnx-s4.sh 5" > "$out/s4.log" &
 ssh_pid=$!
 set -e
 i=0

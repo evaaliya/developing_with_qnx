@@ -330,7 +330,7 @@ static int read_text(const char *path, char *buf, size_t cap, size_t *used)
 static int snapshot_source(uint64_t *next)
 {
     char text[16384];
-    struct issued_item items[SIGNAL_MANIFEST_CAP];
+    static struct issued_item items[SIGNAL_MANIFEST_CAP];
     unsigned count = 0;
     uint64_t max_number = 0;
     uint64_t restart_at = 0;

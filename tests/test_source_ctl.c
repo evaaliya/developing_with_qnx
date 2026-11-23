@@ -218,11 +218,16 @@ int main(void)
     expect_u32("at the urgent period",
                source_schedule_take(&ctl, SOURCE_URGENT_PERIOD_NS, next_ns),
                SIGNAL_CLASS_URGENT);
-    expect_u32("background is due with it",
-               source_schedule_take(&ctl, SOURCE_URGENT_PERIOD_NS, next_ns),
-               SIGNAL_CLASS_BACKGROUND);
+    expect_u32("background waits for its own period",
+               source_schedule_take(&ctl, SOURCE_URGENT_PERIOD_NS, next_ns), 0);
     expect_u32("command is not due yet",
                source_schedule_take(&ctl, SOURCE_URGENT_PERIOD_NS, next_ns), 0);
+    expect_u32("urgent is due again on the background period",
+               source_schedule_take(&ctl, SOURCE_BACKGROUND_PERIOD_NS, next_ns),
+               SIGNAL_CLASS_URGENT);
+    expect_u32("background is due on its period",
+               source_schedule_take(&ctl, SOURCE_BACKGROUND_PERIOD_NS, next_ns),
+               SIGNAL_CLASS_BACKGROUND);
 
     next_ns[0] = 0;
     expect_int("mute the schedule", source_ctl_apply(&ctl, "mute"), 0);
@@ -237,33 +242,22 @@ int main(void)
     {
         int64_t flood_next = 0;
 
-        expect_u32("no flood extras", source_flood_due(0, 0, &flood_next, 0), 0);
+        expect_u32("no flood extras", source_flood_due(0, 0, &flood_next), 0);
         expect_int("off does not arm the next flood", flood_next == 0, 1);
-        expect_u32("flood burst is due at once",
-                   source_flood_due(1, 0, &flood_next, 0), SOURCE_FLOOD_FIRST);
+        expect_u32("flood batch is due at once",
+                   source_flood_due(1, 0, &flood_next), SOURCE_FLOOD_BATCH);
         expect_int("flood period is armed",
                    flood_next == SOURCE_FLOOD_PERIOD_NS, 1);
         expect_u32("flood waits out its period",
-                   source_flood_due(1, SOURCE_FLOOD_PERIOD_NS - 1, &flood_next,
-                                    SOURCE_FLOOD_BURST),
+                   source_flood_due(1, SOURCE_FLOOD_PERIOD_NS - 1, &flood_next),
                    0);
         expect_u32("flood is due again",
-                   source_flood_due(1, SOURCE_FLOOD_PERIOD_NS, &flood_next,
-                                    SOURCE_FLOOD_BURST),
-                   SOURCE_FLOOD_BURST);
-        expect_u32("flood room near the cap",
-                   source_flood_due(1, SOURCE_FLOOD_PERIOD_NS * 2, &flood_next,
-                                    SOURCE_FLOOD_CAP - 2),
-                   2);
+                   source_flood_due(1, SOURCE_FLOOD_PERIOD_NS, &flood_next),
+                   SOURCE_FLOOD_BATCH);
+        expect_u32("null flood clock", source_flood_due(1, 0, NULL), 0);
         flood_next = 0;
-        expect_u32("flood cap",
-                   source_flood_due(1, 0, &flood_next, SOURCE_FLOOD_CAP), 0);
-        expect_int("cap does not arm the next flood", flood_next == 0, 1);
-        expect_u32("null flood clock", source_flood_due(1, 0, NULL, 0), 0);
-        flood_next = 0;
-        expect_u32("later flood episodes are short",
-                   source_flood_due(1, 0, &flood_next, SOURCE_FLOOD_FIRST),
-                   SOURCE_FLOOD_BURST);
+        expect_u32("the next flood is a full batch again",
+                   source_flood_due(1, 0, &flood_next), SOURCE_FLOOD_BATCH);
     }
     expect_u32("null schedule", source_schedule_take(NULL, 0, next_ns), 0);
 

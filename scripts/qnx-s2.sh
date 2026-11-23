@@ -1,10 +1,11 @@
 #!/bin/sh
-# Live BACKGROUND flood for a fixed window. The burst repeats on the
-# source period until flood is turned off (D-057). This is not the
-# counted pack used by make run-flood.
+# Live BACKGROUND flood for a fixed window. Each batch is larger than
+# the ordinary relay queue and repeats until flood is turned off (D-059).
+# This is not the counted pack used by make run-flood.
 set -eu
 
-WINDOW_S=2
+# 5 s at a 20 ms URGENT period is at least 100 URGENT, so p99 has a sample.
+WINDOW_S=5
 
 fail() {
     echo "s2: $1" >&2

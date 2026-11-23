@@ -207,8 +207,9 @@ static void write_lost(const struct relay *node, const struct signal *sig)
 /* Receive thread only. The forward thread reads the marked manifest. */
 static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
 {
-    printf("relay %s: dropped signal %" PRIu64 " class %s\n",
-           node->own_name, number, signal_class_name(class_id));
+    printf("relay %s: dropped signal %" PRIu64 " class %s at %lld ns\n",
+           node->own_name, number, signal_class_name(class_id),
+           (long long)monotonic_ns(node->own_name));
     fflush(stdout);
     if (node->dropped_count >= SIGNAL_MANIFEST_CAP) {
         fprintf(stderr,
@@ -348,7 +349,7 @@ static void *forward_main(void *arg)
 
     for (;;) {
         struct signal_queue_item item;
-        struct signal_manifest manifest;
+        static struct signal_manifest manifest;
         char waiting[4096];
         struct signal_message message;
         struct signal_reply reply;
@@ -556,6 +557,137 @@ static int enqueue(struct relay *node, const struct signal *sig, int64_t arrival
     return rc;
 }
 
+/* Tell the next node now. The manifest still closes the books later. */
+static void announce_dropped(struct relay *node, uint64_t number,
+                             uint32_t class_id);
+
+/*
+ * One MsgSend carries a batch of BACKGROUND. Every signal is admitted
+ * before the reply, and the forward thread is woken only after that
+ * reply, so the batch lands faster than one forward hop (D-059).
+ * Returns 0, or -1 when the process should exit.
+ */
+static int admit_batch(struct relay *node, const struct signal_batch *batch,
+                       rcvid_t rcvid)
+{
+    unsigned n;
+    unsigned i;
+    int64_t now_ns;
+    int queued_any = 0;
+    struct signal dropped[SIGNAL_BATCH_MAX];
+    struct signal lost[SIGNAL_BATCH_MAX];
+    unsigned dropped_n = 0;
+    unsigned lost_n = 0;
+
+    if (batch->count > SIGNAL_BATCH_MAX) {
+        fprintf(stderr, "relay %s: a batch of %u is larger than %d\n",
+                node->own_name, batch->count, SIGNAL_BATCH_MAX);
+        return reject(node->own_name, rcvid, EINVAL,
+                      "rejecting an oversized batch failed");
+    }
+    n = batch->count;
+    for (i = 0; i < n; i++) {
+        if (batch->body[i].class_id != SIGNAL_CLASS_BACKGROUND ||
+            batch->body[i].hop_count >= SIGNAL_MAX_HOPS) {
+            fprintf(stderr, "relay %s: batch signal %" PRIu64
+                    " is not a BACKGROUND signal with room for a hop\n",
+                    node->own_name, batch->body[i].number);
+            return reject(node->own_name, rcvid, EINVAL,
+                          "rejecting a batch signal failed");
+        }
+    }
+
+    now_ns = monotonic_ns(node->own_name);
+    pthread_mutex_lock(&node->lock);
+    for (i = 0; i < n; i++) {
+        struct signal stamped = batch->body[i];
+
+        stamped.hop_ns[stamped.hop_count] = now_ns;
+        stamped.hop_count++;
+        if (node->link_down) {
+            if (lost_n < SIGNAL_BATCH_MAX) {
+                lost[lost_n++] = stamped;
+            }
+            continue;
+        }
+        if (signal_queue_count(&node->queue) >= node->capacity) {
+            if (dropped_n < SIGNAL_BATCH_MAX) {
+                dropped[dropped_n++] = stamped;
+            }
+            continue;
+        }
+        if (signal_queue_push(&node->queue, &stamped, now_ns,
+                              node->next_order) != 0) {
+            pthread_mutex_unlock(&node->lock);
+            fprintf(stderr, "relay %s: batch signal %" PRIu64
+                    " was accepted but did not fit in the queue\n",
+                    node->own_name, stamped.number);
+            return -1;
+        }
+        node->next_order++;
+        queued_any = 1;
+    }
+    pthread_mutex_unlock(&node->lock);
+
+    for (i = 0; i < dropped_n; i++) {
+        note_drop(node, dropped[i].number, dropped[i].class_id);
+    }
+    for (i = 0; i < lost_n; i++) {
+        write_lost(node, &lost[i]);
+    }
+    if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+        fprintf(stderr, "relay %s: replying to a batch failed: %s\n",
+                node->own_name, strerror(errno));
+        return -1;
+    }
+    if (queued_any) {
+        pthread_mutex_lock(&node->lock);
+        wake_forward_locked(node);
+        pthread_mutex_unlock(&node->lock);
+    }
+    for (i = 0; i < dropped_n; i++) {
+        announce_dropped(node, dropped[i].number, dropped[i].class_id);
+    }
+    if (set_fifo(node->own_name, node->own_priority) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Tell the next node now. The manifest still closes the books later. */
+static void announce_dropped(struct relay *node, uint64_t number,
+                             uint32_t class_id)
+{
+    struct signal_dropped notice;
+    int coid;
+    long sent;
+
+    pthread_mutex_lock(&node->lock);
+    coid = node->next_coid;
+    pthread_mutex_unlock(&node->lock);
+    if (coid < 0) {
+        return;
+    }
+    memset(&notice, 0, sizeof notice);
+    notice.type = SIGNAL_MSG_DROPPED;
+    notice.class_id = class_id;
+    notice.number = number;
+    sent = MsgSend(coid, &notice, sizeof notice, NULL, 0);
+    if (sent == -1) {
+        fprintf(stderr,
+                "relay %s: telling the next node about dropped signal %"
+                PRIu64 " failed: %s\n",
+                node->own_name, number, strerror(errno));
+        return;
+    }
+    if (sent != EOK) {
+        fprintf(stderr,
+                "relay %s: the next node rejected the drop notice for %"
+                PRIu64 " with status %ld\n",
+                node->own_name, number, sent);
+    }
+}
+
 static int name_ok(const char *name)
 {
     size_t len;
@@ -631,14 +763,16 @@ static int parse_relay_args(int argc, char **argv, const char **own,
 
 int main(int argc, char **argv)
 {
-    struct relay node;
+    static struct relay node;
     name_attach_t *attach;
     int ceiling;
     int create_rc;
-    union {
+    static union {
         struct _pulse pulse;
         struct signal_message message;
         struct signal_manifest manifest;
+        struct signal_batch batch;
+        struct signal_dropped dropped;
     } buffer;
 
     const char *own_name;
@@ -825,6 +959,45 @@ int main(int argc, char **argv)
             wake_forward_locked(&node);
             pthread_mutex_unlock(&node.lock);
             if (set_fifo(node.own_name, node.own_priority) != 0) {
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+
+        if (buffer.message.type == SIGNAL_MSG_DROPPED) {
+            if (info.msglen < (ssize_t)sizeof(struct signal_dropped)) {
+                fprintf(stderr, "relay %s: the drop notice is the wrong size\n",
+                        node.own_name);
+                if (reject(node.own_name, rcvid, EINVAL,
+                           "rejecting the drop notice failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "relay %s: replying to a drop notice failed: %s\n",
+                        node.own_name, strerror(errno));
+                return EXIT_FAILURE;
+            }
+            announce_dropped(&node, buffer.dropped.number,
+                             buffer.dropped.class_id);
+            continue;
+        }
+
+        if (buffer.message.type == SIGNAL_MSG_BATCH) {
+            if (info.msglen < (ssize_t)sizeof(struct signal_batch)) {
+                fprintf(stderr, "relay %s: the batch is the wrong size\n",
+                        node.own_name);
+                if (reject(node.own_name, rcvid, EINVAL,
+                           "rejecting the batch failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            if (admit_batch(&node, &buffer.batch, rcvid) != 0) {
                 return EXIT_FAILURE;
             }
             continue;

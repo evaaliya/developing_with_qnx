@@ -29,10 +29,15 @@
 
 _Static_assert(SIGNAL_MSG_TYPE > _IO_MAX,
                "SIGNAL_MSG_TYPE is inside the reserved system message range");
+_Static_assert(SOURCE_FLOOD_BATCH == SIGNAL_BATCH_MAX,
+               "the live flood batch must match the wire batch");
+_Static_assert(SOURCE_FLOOD_BATCH > SIGNAL_QUEUE_CAP,
+               "one flood batch must overflow the ordinary relay queue");
 
-/* The device thread and the sender share this. D-053. */
+/* The device thread, the timer, and the flood thread share the flags. */
 static struct source_control g_ctl;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_issue_lock = PTHREAD_MUTEX_INITIALIZER;
 static dispatch_t *g_dpp;
 
 static void ctl_lock(void)
@@ -85,8 +90,7 @@ static void open_telemetry(void)
     }
 }
 
-/* Placeholder until a measured deadline is chosen. One local message fits. */
-#define DEMO_DEADLINE_NS 1000000000LL
+/* Class deadlines are the measured values in signal_msg.h (D-058). */
 #define FIND_ATTEMPTS 40
 #define FIND_PAUSE_NS 50000000L
 #define SEND_TIMEOUT_SECONDS 5u
@@ -294,7 +298,11 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
     message.body.number = number;
     message.body.class_id = class_id;
     message.body.issued_ns = monotonic_ns();
-    message.body.deadline_ns = DEMO_DEADLINE_NS;
+    message.body.deadline_ns = signal_class_deadline_ns(class_id);
+    if (message.body.deadline_ns < 0) {
+        fprintf(stderr, "source: class %u has no deadline\n", class_id);
+        return -1;
+    }
 
     memset(&reply, 0, sizeof reply);
     alarm(SEND_TIMEOUT_SECONDS);
@@ -531,6 +539,8 @@ static int issue_one(int coid, struct signal_manifest *manifest,
                      unsigned long *recorded, uint64_t *number,
                      uint32_t class_id, int *full)
 {
+    int rc;
+
     if (*full || *recorded >= SIGNAL_MANIFEST_CAP) {
         if (!*full) {
             fprintf(stderr, "source: the issued list is full; not sending more\n");
@@ -538,22 +548,178 @@ static int issue_one(int coid, struct signal_manifest *manifest,
         }
         return 0;
     }
-    if (send_recorded(coid, manifest, recorded, number, class_id, 0) != 0) {
+    pthread_mutex_lock(&g_issue_lock);
+    if (*full || *recorded >= SIGNAL_MANIFEST_CAP) {
+        pthread_mutex_unlock(&g_issue_lock);
+        if (!*full) {
+            fprintf(stderr, "source: the issued list is full; not sending more\n");
+            *full = 1;
+        }
+        return 0;
+    }
+    rc = send_recorded(coid, manifest, recorded, number, class_id, 0);
+    pthread_mutex_unlock(&g_issue_lock);
+    if (rc != 0) {
         return -1;
     }
     return 1;
 }
 
+struct live_book {
+    int coid;
+    struct signal_manifest *manifest;
+    unsigned long *recorded;
+    uint64_t *number;
+    int *full;
+    int failed;
+    int stop;
+};
+
+static struct live_book g_live;
+static pthread_t g_flood_thread;
+static int g_flood_started;
+
+static int send_flood_batch(unsigned count)
+{
+    struct signal_batch batch;
+    unsigned i;
+    unsigned sent_n = 0;
+    long sent;
+    int64_t now;
+    int64_t deadline;
+
+    if (count == 0 || count > SIGNAL_BATCH_MAX) {
+        return -1;
+    }
+    deadline = signal_class_deadline_ns(SIGNAL_CLASS_BACKGROUND);
+    if (deadline < 0) {
+        fprintf(stderr, "source: BACKGROUND has no deadline\n");
+        return -1;
+    }
+    if (set_fifo(SIGNAL_PRIO_BACKGROUND) != 0) {
+        return -1;
+    }
+    memset(&batch, 0, sizeof batch);
+    batch.type = SIGNAL_MSG_BATCH;
+    now = monotonic_ns();
+    pthread_mutex_lock(&g_issue_lock);
+    if (g_live.stop) {
+        pthread_mutex_unlock(&g_issue_lock);
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (*g_live.full || *g_live.recorded >= SIGNAL_MANIFEST_CAP) {
+            if (!*g_live.full) {
+                fprintf(stderr,
+                        "source: the issued list is full; not sending more\n");
+                *g_live.full = 1;
+            }
+            break;
+        }
+        batch.body[sent_n].number = *g_live.number;
+        batch.body[sent_n].class_id = SIGNAL_CLASS_BACKGROUND;
+        batch.body[sent_n].issued_ns = now;
+        batch.body[sent_n].deadline_ns = deadline;
+        g_live.manifest->item[*g_live.recorded].number = *g_live.number;
+        g_live.manifest->item[*g_live.recorded].class_id = SIGNAL_CLASS_BACKGROUND;
+        ctl_lock();
+        source_ctl_note_issued(&g_ctl, SIGNAL_CLASS_BACKGROUND);
+        ctl_unlock();
+        (*g_live.recorded)++;
+        (*g_live.number)++;
+        sent_n++;
+    }
+    if (sent_n == 0) {
+        pthread_mutex_unlock(&g_issue_lock);
+        return 0;
+    }
+    batch.count = (uint16_t)sent_n;
+    alarm(SEND_TIMEOUT_SECONDS);
+    sent = MsgSend(g_live.coid, &batch, sizeof batch, NULL, 0);
+    alarm(0);
+    if (sent == -1) {
+        fprintf(stderr, "source: sending a BACKGROUND batch failed: %s\n",
+                strerror(errno));
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return -1;
+    }
+    if (sent != EOK) {
+        fprintf(stderr, "source: the next node rejected a BACKGROUND batch "
+                "with status %ld\n", sent);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return -1;
+    }
+    pthread_mutex_unlock(&g_issue_lock);
+    for (i = 0; i < sent_n; i++) {
+        printf("source: sent signal %" PRIu64 " class %s\n",
+               batch.body[i].number, signal_class_name(SIGNAL_CLASS_BACKGROUND));
+        printf("source: flood signal %" PRIu64 " at %lld ns\n",
+               batch.body[i].number, (long long)now);
+    }
+    printf("source: flood batch %u at %lld ns\n", sent_n, (long long)now);
+    fflush(stdout);
+    publish_source(0);
+    return 1;
+}
+
+static void *flood_thread(void *arg)
+{
+    int64_t next_ns = 0;
+    struct timespec pause;
+
+    (void)arg;
+    if (pin_cpu0() != 0) {
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return NULL;
+    }
+    memset(&pause, 0, sizeof pause);
+    pause.tv_nsec = 20000000L;
+    for (;;) {
+        int flood;
+        int stop;
+        unsigned batch;
+
+        nanosleep(&pause, NULL);
+        pthread_mutex_lock(&g_issue_lock);
+        stop = g_live.stop || g_live.failed;
+        pthread_mutex_unlock(&g_issue_lock);
+        if (stop) {
+            break;
+        }
+        ctl_lock();
+        flood = g_ctl.flood;
+        stop = g_ctl.stop;
+        ctl_unlock();
+        if (stop) {
+            break;
+        }
+        if (!flood) {
+            next_ns = 0;
+            continue;
+        }
+        batch = source_flood_due(1, monotonic_ns(), &next_ns);
+        if (batch == 0) {
+            continue;
+        }
+        if (send_flood_batch(batch) < 0) {
+            break;
+        }
+    }
+    return NULL;
+}
+
 static int run_live(int argc, char **argv)
 {
-    struct signal_manifest manifest;
+    static struct signal_manifest manifest;
     struct sigevent event;
     struct itimerspec spec;
     int64_t next_ns[3];
     unsigned long recorded = 0;
     uint64_t number = 1;
-    unsigned flood_sent = 0;
-    int64_t flood_next = 0;
     int coid;
     int timer_chid;
     int timer_coid;
@@ -636,8 +802,8 @@ static int run_live(int argc, char **argv)
            (long long)SOURCE_COMMAND_PERIOD_NS,
            (long long)SOURCE_BACKGROUND_PERIOD_NS);
     printf("source: flood every %lld ns, first %u, burst %u, cap %u\n",
-           (long long)SOURCE_FLOOD_PERIOD_NS, SOURCE_FLOOD_FIRST,
-           SOURCE_FLOOD_BURST, SOURCE_FLOOD_CAP);
+           (long long)SOURCE_FLOOD_PERIOD_NS, SOURCE_FLOOD_BATCH,
+           SOURCE_FLOOD_BATCH, SOURCE_FLOOD_BATCH);
     fflush(stdout);
 
     memset(&manifest, 0, sizeof manifest);
@@ -645,25 +811,36 @@ static int run_live(int argc, char **argv)
     next_ns[0] = 0;
     next_ns[1] = 0;
     next_ns[2] = 0;
+    memset(&g_live, 0, sizeof g_live);
+    g_live.coid = coid;
+    g_live.manifest = &manifest;
+    g_live.recorded = &recorded;
+    g_live.number = &number;
+    g_live.full = &full;
+    if (pthread_create(&g_flood_thread, NULL, flood_thread, NULL) != 0) {
+        fprintf(stderr, "source: creating the flood thread failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    g_flood_started = 1;
 
     for (;;) {
         struct _pulse pulse;
         rcvid_t rcvid;
         int stop;
-        int flood;
-        unsigned extras;
-        unsigned k;
 
         ctl_lock();
         stop = g_ctl.stop;
-        flood = g_ctl.flood;
         ctl_unlock();
         if (stop) {
             break;
         }
-        if (!flood) {
-            flood_sent = 0;
-            flood_next = 0;
+        pthread_mutex_lock(&g_issue_lock);
+        failed = g_live.failed;
+        pthread_mutex_unlock(&g_issue_lock);
+        if (failed) {
+            break;
         }
         if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
             failed = 1;
@@ -733,46 +910,17 @@ static int run_live(int argc, char **argv)
         if (failed) {
             break;
         }
+    }
 
-        ctl_lock();
-        stop = g_ctl.stop;
-        flood = g_ctl.flood;
-        ctl_unlock();
-        if (!flood) {
-            flood_sent = 0;
-            flood_next = 0;
-            extras = 0;
-        } else {
-            extras = source_flood_due(1, monotonic_ns(), &flood_next, flood_sent);
-        }
-        if (stop) {
-            break;
-        }
-        for (k = 0; k < extras && !full && !failed; k++) {
-            ctl_lock();
-            stop = g_ctl.stop;
-            flood = g_ctl.flood;
-            ctl_unlock();
-            if (stop || !flood) {
-                break;
-            }
-            {
-                int issued = issue_one(coid, &manifest, &recorded, &number,
-                                       SIGNAL_CLASS_BACKGROUND, &full);
-
-                if (issued < 0) {
-                    failed = 1;
-                    break;
-                }
-                if (issued == 0) {
-                    break;
-                }
-                printf("source: flood signal %" PRIu64 " at %lld ns\n",
-                       number - 1, (long long)monotonic_ns());
-                fflush(stdout);
-            }
-            flood_sent++;
-        }
+    pthread_mutex_lock(&g_issue_lock);
+    g_live.stop = 1;
+    if (g_live.failed) {
+        failed = 1;
+    }
+    pthread_mutex_unlock(&g_issue_lock);
+    if (g_flood_started) {
+        pthread_join(g_flood_thread, NULL);
+        g_flood_started = 0;
     }
 
     memset(&spec, 0, sizeof spec);
@@ -817,8 +965,8 @@ int main(int argc, char **argv)
     uint32_t plan[SIGNAL_QUEUE_CAP];
     uint32_t planned = 0;
     uint32_t step;
-    struct signal_manifest manifest;
-    struct issued_item prior[SIGNAL_MANIFEST_CAP];
+    static struct signal_manifest manifest;
+    static struct issued_item prior[SIGNAL_MANIFEST_CAP];
     unsigned prior_count = 0;
 
     while (arg0 < argc && argv[arg0][0] == '-' && argv[arg0][1] != '\0') {

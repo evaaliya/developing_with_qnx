@@ -34,10 +34,12 @@ s1 << "live: path /dev/signal-source\n"
 s1 << "s4: live seconds 4\n"
 s1 << "sink: state INIT\n"
 s1 << "sink: state NORMAL\n"
-s1 << format(signal, 1, "URGENT", 800_000)
-s1 << format(signal, 2, "COMMAND", 1_800_000)
-s1 << format(signal, 3, "BACKGROUND", 5_000_000)
-s1 << "sink: summary URGENT received 1, on time 1, late 0, lost 0, dropped 0\n"
+100.times do |i|
+  s1 << format(signal, i + 1, "URGENT", 800_000)
+end
+s1 << format(signal, 201, "COMMAND", 1_800_000)
+s1 << format(signal, 202, "BACKGROUND", 5_000_000)
+s1 << "sink: summary URGENT received 100, on time 100, late 0, lost 0, dropped 0\n"
 s1 << "sink: summary COMMAND received 1, on time 1, late 0, lost 0, dropped 0\n"
 s1 << "sink: summary BACKGROUND received 1, on time 1, late 0, lost 0, dropped 0\n"
 s1 << "sink: unaccounted 0\n"
@@ -50,14 +52,20 @@ s2 << "s2: window start 100.000000000\n"
 s2 << "s2: window end 102.050000000\n"
 s2 << "source: flood every 500000000 ns, burst 8, cap 48\n"
 s2 << "sink: state NORMAL\n"
+s2 << "sink: state DEGRADED\n"
 32.times do |i|
   at = 1_000_000_000 + (i / 8) * 500_000_000 + (i % 8) * 1000
   s2 << "source: sent signal #{10 + i} class BACKGROUND\n"
   s2 << "source: flood signal #{10 + i} at #{at} ns\n"
 end
-s2 << format(signal, 1, "URGENT", 900_000)
+s2 << "relay signal-relay-a: dropped signal 10 class BACKGROUND at 1000000000 ns\n"
+s2 << "relay signal-relay-a: dropped signal 20 class BACKGROUND at 1750000000 ns\n"
+s2 << "relay signal-relay-a: dropped signal 30 class BACKGROUND at 2500007000 ns\n"
+100.times do |i|
+  s2 << format(signal, 300 + i, "URGENT", 900_000)
+end
 s2 << format(signal, 2, "COMMAND", 1_900_000)
-s2 << "sink: summary URGENT received 4, on time 4, late 0, lost 0, dropped 0\n"
+s2 << "sink: summary URGENT received 100, on time 100, late 0, lost 0, dropped 0\n"
 s2 << "sink: summary COMMAND received 2, on time 2, late 0, lost 0, dropped 0\n"
 s2 << "sink: summary BACKGROUND received 16, on time 12, late 0, lost 0, dropped 4\n"
 s2 << "sink: unaccounted 0\n"
@@ -94,8 +102,10 @@ s4 << "s4: panel killed\n"
 s4 << "s4: telemetry killed\n"
 s4 << "supervisor: restarted telemetry pid=9\n"
 s4 << "sink: state NORMAL\n"
-s4 << format(signal, 1, "URGENT", 810_000)
-s4 << "sink: summary URGENT received 1, on time 1, late 0, lost 0, dropped 0\n"
+100.times do |i|
+  s4 << format(signal, i + 1, "URGENT", 810_000)
+end
+s4 << "sink: summary URGENT received 100, on time 100, late 0, lost 0, dropped 0\n"
 s4 << "sink: summary COMMAND received 1, on time 1, late 0, lost 0, dropped 0\n"
 s4 << "sink: summary BACKGROUND received 1, on time 1, late 0, lost 0, dropped 0\n"
 s4 << "sink: unaccounted 0\n"
@@ -115,8 +125,8 @@ failures = check("a complete table passes",
                    out.include?("порога нет") && out.include?("прошёл") &&
                    !out.include?(FAIL),
                  failures)
-failures = check("R1 has numbers and no threshold verdict",
-                 out =~ /S1 \| R1 \| URGENT on time 1\/1 \| #{NONE}/,
+failures = check("R1 passes when every URGENT is on time and n is at least 100",
+                 out =~ /S1 \| R1 \| URGENT on time 100\/100; threshold 1 and n >= 100 \| #{PASS}/,
                  failures)
 failures = check("R6 is one run and has no threshold",
                  out.include?("one run, not a measurement; kill to SAFE 400000000 ns") &&
