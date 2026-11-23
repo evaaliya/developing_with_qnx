@@ -578,6 +578,7 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
     struct signal lost[SIGNAL_BATCH_MAX];
     unsigned dropped_n = 0;
     unsigned lost_n = 0;
+    unsigned waiting_before;
 
     if (batch->count > SIGNAL_BATCH_MAX) {
         fprintf(stderr, "relay %s: a batch of %u is larger than %d\n",
@@ -599,6 +600,7 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
 
     now_ns = monotonic_ns(node->own_name);
     pthread_mutex_lock(&node->lock);
+    waiting_before = signal_queue_count(&node->queue);
     for (i = 0; i < n; i++) {
         struct signal stamped = batch->body[i];
 
@@ -645,8 +647,21 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
         wake_forward_locked(node);
         pthread_mutex_unlock(&node->lock);
     }
-    for (i = 0; i < dropped_n; i++) {
-        announce_dropped(node, dropped[i].number, dropped[i].class_id);
+    /*
+     * The queue occupancy at arrival shows whether the chain drained
+     * between batches. A drained queue reads 0 (D-060).
+     */
+    printf("relay %s: batch %u queued %u dropped %u waiting before %u\n",
+           node->own_name, n, n - dropped_n - lost_n, dropped_n,
+           waiting_before);
+    fflush(stdout);
+    /*
+     * One notice per batch is enough to move sink to DEGRADED; the
+     * manifest still marks every dropped number. One MsgSend per drop
+     * kept this receive thread away from URGENT for a whole batch (D-060).
+     */
+    if (dropped_n > 0) {
+        announce_dropped(node, dropped[0].number, dropped[0].class_id);
     }
     if (set_fifo(node->own_name, node->own_priority) != 0) {
         return -1;
