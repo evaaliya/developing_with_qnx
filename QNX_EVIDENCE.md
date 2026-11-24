@@ -2125,7 +2125,7 @@ Guest after all runs:
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
 
-## 2026-11-25 01:04 – 04:05 +06 · URGENT starved by its own threads, a stuck send, and a stricter stall rule
+## 2026-11-25 01:04 – 04:00 +06 · URGENT starved by its own threads, a stuck send, and a stricter stall rule
 
 What changed (decisions D-068 to D-071):
 
