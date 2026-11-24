@@ -6,7 +6,12 @@
 # lock: K deaths in a row, then LOCKED_SAFE. K is chosen here.
 # stop: SIGSTOP relay B, then SIGCONT. The process stays alive.
 # source: one death of source, then the supervisor restarts it.
+# Every mode runs stall-probe beside the network. Each late URGENT or
+# COMMAND must fall inside a guest stall or inside the fault the mode
+# caused on purpose, or the run fails (qnx-late-check.sh, D-064).
 set -eu
+
+LATE=/tmp/qnx-late-check.sh
 
 # Prints the same sections make run used to print from the ssh command.
 # set -e is off around source and the waits: a non-zero source still has
@@ -26,6 +31,7 @@ run_chain() {
     source_status=0
     sink_status=0
 
+    "$LATE" start 300 || exit 1
     if [ "$pin" = "pin" ]; then
         /tmp/sink -c 0 "$total" > /tmp/sink.out 2>&1 &
     else
@@ -66,10 +72,18 @@ run_chain() {
     cat /tmp/relay-b.out
     echo "--- sink (exit $sink_status) ---"
     cat /tmp/sink.out
+    late_status=0
+    "$LATE" check late-check || late_status=$?
     if [ "$source_status" -ne 0 ]; then
         exit "$source_status"
     fi
-    exit "$sink_status"
+    if [ "$sink_status" -ne 0 ]; then
+        exit "$sink_status"
+    fi
+    if [ "$late_status" -ne 0 ]; then
+        exit 1
+    fi
+    exit 0
 }
 
 mode=${1:-}
@@ -132,6 +146,7 @@ slay -Q -f -s SIGKILL qconn >/dev/null 2>&1 || true
 
 rm -f /tmp/supervisor.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out /tmp/source.out
 
+"$LATE" start 300 || exit 1
 /tmp/supervisor -k "$k" -u "$urgent" -c "$command" -b "$background" -g 200 -w 2000 >/tmp/supervisor.out 2>&1 &
 sup=$!
 
@@ -159,6 +174,7 @@ fi
 
 if [ "$mode" = "stop" ]; then
     echo "scenario: stopping relay-b pid $pid"
+    "$LATE" fault-begin stop-relay-b
     kill -STOP "$pid"
     s=0
     while [ "$s" -lt 8 ]; do
@@ -193,6 +209,7 @@ if [ "$mode" = "stop" ]; then
     fi
     echo "scenario: continuing relay-b pid $pid"
     kill -CONT "$pid"
+    "$LATE" fault-end stop-relay-b
 elif [ "$mode" = "source" ]; then
     source_pid=$(grep 'supervisor: node source pid=' /tmp/supervisor.out | tail -1 | sed 's/.*pid=//')
     if [ -z "$source_pid" ]; then
@@ -216,6 +233,7 @@ elif [ "$mode" = "source" ]; then
     fi
     echo "scenario: path before kill"
     ls -l /dev/signal-source
+    "$LATE" fault-begin kill-source
     kill -KILL "$source_pid"
     i=0
     while [ "$i" -lt 10 ]; do
@@ -239,6 +257,7 @@ elif [ "$mode" = "source" ]; then
         if [ -e /dev/signal-source ]; then
             echo "scenario: path after restart"
             ls -l /dev/signal-source
+            "$LATE" fault-end kill-source
             break
         fi
         i=$((i + 1))
@@ -259,6 +278,7 @@ else
     if [ "$mode" = "kill" ]; then
         echo "scenario: clock before-kill $(date +%s.%N)"
     fi
+    "$LATE" fault-begin kill-relay-b
     kill -KILL "$pid"
     if [ "$mode" = "kill" ]; then
         s=0
@@ -278,6 +298,7 @@ else
                 END { exit found ? 0 : 1 }
             ' /tmp/sink.out; then
                 echo "scenario: clock recovered $(date +%s.%N)"
+                "$LATE" fault-end kill-relay-b
                 break
             fi
             s=$((s + 1))
@@ -325,6 +346,9 @@ cat /tmp/relay-b.out
 echo "--- sink ---"
 cat /tmp/sink.out
 
+late_status=0
+"$LATE" check late-check || late_status=$?
+
 if [ "$mode" = "kill" ]; then
     awk '
         /sink: state SAFE/ { safe = 1 }
@@ -361,6 +385,9 @@ if [ "$mode" = "source" ]; then
     grep 'supervisor: restarted source' /tmp/supervisor.out >/dev/null
     grep 'died before its issued list arrived' /tmp/sink.out >/dev/null
     grep 'sink: unaccounted 0' /tmp/sink.out >/dev/null
+fi
+if [ "$status" -eq 0 ] && [ "$late_status" -ne 0 ]; then
+    exit 1
 fi
 
 exit "$status"

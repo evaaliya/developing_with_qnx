@@ -31,6 +31,7 @@ done
 rm -f /tmp/supervisor.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out \
     /tmp/source.out /tmp/telemetry.out
 
+/tmp/qnx-late-check.sh start 120 || exit 1
 /tmp/supervisor -k 3 -u 12 -c 6 -b 6 -w 2000 -L >/tmp/supervisor.out 2>&1 &
 sup=$!
 
@@ -90,4 +91,6 @@ echo "--- relay B ---"
 cat /tmp/relay-b.out 2>/dev/null || true
 echo "--- sink ---"
 cat /tmp/sink.out 2>/dev/null || true
+# The scenario report reads these lines; its rows decide (D-064).
+/tmp/qnx-late-check.sh check late-check || true
 exit "$status"

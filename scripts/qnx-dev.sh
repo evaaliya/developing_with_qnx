@@ -46,6 +46,7 @@ done
 rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out \
     /tmp/dev-status.txt /tmp/bad-command.err /tmp/telemetry.out
 
+/tmp/qnx-late-check.sh start 300 || fail "the stall probe did not start"
 SIGNAL_TELEMETRY=1
 export SIGNAL_TELEMETRY
 /tmp/telemetry > /tmp/telemetry.out 2>&1 &
@@ -232,11 +233,9 @@ fi
 if ! grep 'sink: unaccounted 0' /tmp/sink.out >/dev/null; then
     fail "unaccounted is not 0"
 fi
-if ! grep 'sink: summary URGENT .*late 0' /tmp/sink.out >/dev/null; then
-    fail "URGENT was late"
-fi
-if ! grep 'sink: summary COMMAND .*late 0' /tmp/sink.out >/dev/null; then
-    fail "COMMAND was late"
+# A late URGENT or COMMAND passes only inside a guest stall (D-064).
+if ! /tmp/qnx-late-check.sh check late-check; then
+    fail "a late URGENT or COMMAND was not inside a guest stall"
 fi
 if grep 'dropped signal' /tmp/relay-a.out | grep -v 'class BACKGROUND' >/dev/null 2>&1; then
     fail "a dropped signal was not BACKGROUND"

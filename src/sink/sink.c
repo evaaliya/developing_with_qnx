@@ -740,6 +740,20 @@ int main(int argc, char **argv)
             print_signal(&buffer.body.message.body, verdict, presentation,
                          now_ns);
         }
+        /*
+         * One line per late signal in both log modes, with its arrival on
+         * CLOCK_MONOTONIC, so qnx-late-check.sh can hold it against the
+         * stall probe and the check's own faults (D-064).
+         */
+        if (verdict != SIGNAL_ON_TIME) {
+            printf("sink: late signal %" PRIu64 " class %s at %lld ms, "
+                   "total %" PRId64 " ns\n",
+                   buffer.body.message.body.number,
+                   signal_class_name(buffer.body.message.body.class_id),
+                   (long long)(now_ns / 1000000LL),
+                   now_ns - buffer.body.message.body.issued_ns);
+            fflush(stdout);
+        }
         show_state(&shown, machine.state);
     }
 

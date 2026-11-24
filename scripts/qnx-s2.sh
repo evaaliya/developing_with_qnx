@@ -33,6 +33,7 @@ slay -Q -f sink >/dev/null 2>&1 || true
 
 rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out
 
+/tmp/qnx-late-check.sh start 120 || fail "the stall probe did not start"
 /tmp/sink 64 2000 > /tmp/sink.out 2>&1 &
 sink_pid=$!
 /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
@@ -107,6 +108,8 @@ echo "--- relay B ---"
 cat /tmp/relay-b.out
 echo "--- sink (exit $sink_status) ---"
 cat /tmp/sink.out
+# The scenario report reads these lines; its rows decide (D-064).
+/tmp/qnx-late-check.sh check late-check || true
 
 if [ "$source_status" -ne 0 ]; then
     exit "$source_status"

@@ -62,10 +62,9 @@ rm -f /tmp/supervisor.out /tmp/source.out /tmp/sink.out /tmp/relay-a.out \
     /tmp/relay-b.out /tmp/telemetry.out /tmp/live-restart-events.txt \
     /tmp/stall-probe.out
 
-probe_pid=
-if [ -x /tmp/stall-probe ]; then
-    /tmp/stall-probe $((RUN_S + 60)) 5 > /tmp/stall-probe.out 2>&1 &
-    probe_pid=$!
+if ! /tmp/qnx-late-check.sh start $((RUN_S + 120)); then
+    echo "live-restart: FAIL the stall probe did not start" >&2
+    exit 1
 fi
 /tmp/supervisor -k "$K" -w "$WINDOW_MS" -L > /tmp/supervisor.out 2>&1 &
 sup=$!
@@ -133,10 +132,6 @@ set +e
 wait "$sup"
 sup_status=$?
 set -e
-if [ -n "$probe_pid" ]; then
-    kill "$probe_pid" >/dev/null 2>&1 || true
-    wait "$probe_pid" >/dev/null 2>&1 || true
-fi
 
 # The network has stopped: from here on the logs may be read whole.
 set +e
@@ -161,7 +156,6 @@ echo "sink: closes $(grep -c '^sink: closed ' /tmp/sink.out || true)"
 df -k /tmp | tail -1 | sed 's/^/live-restart: guest \/tmp /'
 ls -l /tmp/source.out /tmp/relay-a.out /tmp/relay-b.out /tmp/sink.out /tmp/supervisor.out |
     awk '{ print "live-restart: log " $NF " " $5 " bytes" }'
-[ -n "$probe_pid" ] && grep -E 'start|wakes' /tmp/stall-probe.out | sed 's/^/live-restart: /'
 
 failed=0
 check() {
@@ -210,26 +204,12 @@ done
 urgent=$(awk '$1 == "source:" && $2 == "issued" { print $4 }' /tmp/source.out | tail -1)
 [ "${urgent:-0}" -ge $((RUN_S * 30)) ]; check $? "URGENT issued ${urgent:-none} covers the run (at least $((RUN_S * 30)))"
 
-# Late URGENT or COMMAND against the stall probe, as in run-long-live.
-if [ -s /tmp/stall-probe.out ]; then
-    awk '
-        FILENAME ~ /stall-probe/ && $2 == "woke" {
-            n++; s0[n] = $7; s1[n] = $7 + $3 / 1000000; next
-        }
-        FILENAME ~ /sink/ && / class (URGENT|COMMAND) late/ {
-            t = $3; total = $NF == "ns" ? $(NF - 1) : 0
-            a = t - total / 1000000; hit = 0
-            for (i = 1; i <= n; i++) if (s0[i] <= t && s1[i] >= a) { hit = i; break }
-            if (hit) { inside++; printf "live-restart: late %s %s inside a guest stall of %.0f ms at %s ms\n", $7, $9, s1[hit] - s0[hit], s0[hit] }
-            else { outside++; printf "live-restart: late %s %s NOT inside a guest stall (%s ms to %s ms)\n", $7, $9, int(a), t }
-        }
-        END { printf "live-restart: late URGENT or COMMAND inside guest stalls %d, outside %d\n", inside + 0, outside + 0
-              exit outside > 0 ? 1 : 0 }
-    ' /tmp/stall-probe.out /tmp/sink.out
-    check $? "every late URGENT or COMMAND is inside a guest stall"
-else
-    check 1 "stall probe output present"
-fi
+# Late URGENT or COMMAND against the stall probe (qnx-late-check.sh,
+# D-064). The kills are faults of this check, but a kill loses signals,
+# it does not delay them, so no fault window is marked: a late signal
+# must be inside a guest stall.
+/tmp/qnx-late-check.sh check live-restart
+check $? "every late URGENT or COMMAND is inside a guest stall"
 
 if [ "$failed" -eq 0 ]; then
     echo "live-restart: PASS"

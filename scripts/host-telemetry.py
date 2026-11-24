@@ -291,7 +291,9 @@ def main():
                 "network stopped issuing while telemetry was stopped (%d then %d)"
                 % (before, after)
             )
-        if late != 0 or safe != 0:
+        # A late URGENT is held against the stall probe when the guest
+        # script ends (qnx-late-check.sh, D-064); SAFE is never excused.
+        if safe != 0:
             fail(
                 "telemetry stop moved the network: URGENT late %d, SAFE lines %d"
                 % (late, safe)
@@ -373,6 +375,10 @@ def main():
             proc.kill()
             fail("guest scenario did not exit")
         log.close()
+    with open(log_path) as guest_log:
+        for line in guest_log:
+            if line.startswith("late-check: "):
+                print("telemetry-check " + line.rstrip())
     if proc.returncode != 0:
         fail("guest scenario exited %d" % proc.returncode)
     code, out, err = ssh(

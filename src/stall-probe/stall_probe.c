@@ -8,6 +8,9 @@
  * the network (B22).
  *
  * usage: stall-probe <seconds> [threshold-ms]
+ *        stall-probe now    prints CLOCK_MONOTONIC in ms and exits, so a
+ *                           check can mark its own fault on the clock the
+ *                           sink and the probe print (D-064)
  */
 
 #include <errno.h>
@@ -42,8 +45,17 @@ int main(int argc, char **argv)
     unsigned long wakes = 0;
     unsigned long stalls = 0;
 
+    if (argc == 2 && strcmp(argv[1], "now") == 0) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            fprintf(stderr, "stall-probe: reading the clock failed: %s\n",
+                    strerror(errno));
+            return EXIT_FAILURE;
+        }
+        printf("%lld\n", (long long)(to_ns(&now) / 1000000LL));
+        return EXIT_SUCCESS;
+    }
     if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: stall-probe <seconds> [threshold-ms]\n");
+        fprintf(stderr, "usage: stall-probe <seconds> [threshold-ms] | now\n");
         return EXIT_FAILURE;
     }
     seconds = strtol(argv[1], &end, 10);

@@ -28,6 +28,7 @@ urgent_silent() {
     slay -Q -f sink >/dev/null 2>&1 || true
     rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out
 
+    /tmp/qnx-late-check.sh start 120 || return 1
     /tmp/sink 64 2000 > /tmp/sink.out 2>&1 &
     sink_pid=$!
     /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
@@ -96,6 +97,7 @@ urgent_silent() {
     cat /tmp/source.out 2>/dev/null || true
     echo "--- sink ---"
     cat /tmp/sink.out 2>/dev/null || true
+    /tmp/qnx-late-check.sh check late-check || return 1
     return 0
 }
 

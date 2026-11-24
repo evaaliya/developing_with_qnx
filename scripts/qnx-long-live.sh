@@ -46,11 +46,7 @@ rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out \
     /tmp/long-live-status.txt /tmp/stall-probe.out
 
 # A probe above every class shows whether the whole guest stopped.
-probe_pid=
-if [ -x /tmp/stall-probe ]; then
-    /tmp/stall-probe $((RUN_S + 20)) 5 > /tmp/stall-probe.out 2>&1 &
-    probe_pid=$!
-fi
+/tmp/qnx-late-check.sh start $((RUN_S + 60)) || fail "the stall probe did not start"
 /tmp/sink 64 1500 > /tmp/sink.out 2>&1 &
 sink_pid=$!
 /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
@@ -105,11 +101,6 @@ wait "$relay_a" >/dev/null 2>&1 || true
 wait "$relay_b" >/dev/null 2>&1 || true
 set -e
 
-if [ -n "$probe_pid" ]; then
-    kill "$probe_pid" >/dev/null 2>&1 || true
-    wait "$probe_pid" >/dev/null 2>&1 || true
-    grep -E 'start|wakes' /tmp/stall-probe.out | sed 's/^/long-live: /'
-fi
 grep -E 'class (URGENT|COMMAND) late|state (SAFE|RECOVERING)' /tmp/sink.out | sed 's/^/long-live: /' || true
 echo "long-live: ran $((end - start)) s, source exit $source_status, sink exit $sink_status"
 sed 's/^/long-live: command /' /tmp/long-live-status.txt
@@ -141,23 +132,9 @@ grep 'sink: summary URGENT .*lost 0, dropped 0' /tmp/sink.out >/dev/null ||
 grep 'sink: summary COMMAND .*lost 0, dropped 0' /tmp/sink.out >/dev/null ||
     fail "COMMAND was lost or dropped"
 # Each late URGENT or COMMAND against the probe: was the whole guest
-# stopped while the signal was on its way? The window of a late signal
-# is [arrival - total, arrival]; a stall is [due, due + late].
-[ -s /tmp/stall-probe.out ] || fail "no stall probe output to check late signals against"
-awk '
-    FILENAME ~ /stall-probe/ && $2 == "woke" {
-        n++; s0[n] = $7; s1[n] = $7 + $3 / 1000000; next
-    }
-    FILENAME ~ /sink/ && / class (URGENT|COMMAND) late/ {
-        t = $3; total = $NF == "ns" ? $(NF - 1) : 0
-        a = t - total / 1000000; hit = 0
-        for (i = 1; i <= n; i++) if (s0[i] <= t && s1[i] >= a) { hit = i; break }
-        if (hit) { inside++; printf "long-live: late %s %s inside a guest stall of %.0f ms at %s ms\n", $7, $9, s1[hit] - s0[hit], s0[hit] }
-        else { outside++; printf "long-live: late %s %s NOT inside a guest stall (%s ms to %s ms)\n", $7, $9, int(a), t }
-    }
-    END { printf "long-live: late URGENT or COMMAND inside guest stalls %d, outside %d\n", inside + 0, outside + 0
-          exit outside > 0 ? 1 : 0 }
-' /tmp/stall-probe.out /tmp/sink.out || fail "a late URGENT or COMMAND was not inside a guest stall"
+# stopped while the signal was on its way? (qnx-late-check.sh, D-064)
+/tmp/qnx-late-check.sh check long-live ||
+    fail "a late URGENT or COMMAND was not inside a guest stall"
 for c in URGENT COMMAND BACKGROUND; do
     issued=$(awk -v c="$c" '$1 == "source:" && $2 == "issued" {
         for (i = 3; i < NF; i += 2) if ($i == c) print $(i + 1) }' /tmp/source.out)

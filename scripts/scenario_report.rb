@@ -40,6 +40,11 @@ class ScenarioReport
       return 2
     end
     s1, s2, s3, s4 = logs
+    @late = {
+      "S1" => late_check(s1), "S2" => late_check(s2),
+      "S3" => late_check(s3), "S4" => late_check(s4)
+    }
+    print_late_lines([["S1", s1], ["S2", s2], ["S3", s3], ["S4", s4]])
     lat1 = latency(s1_path)
     lat2 = latency(s2_path)
     lat4 = latency(s4_path)
@@ -161,6 +166,87 @@ class ScenarioReport
     !row.nil? && accounted(row) >= R1_MIN_N && row[:on_time] == accounted(row)
   end
 
+  # qnx-late-check.sh lines (D-064), summed over every block in the log
+  # (S3 has one per section). nil when the log has none: then late
+  # signals were not held against the stall probe.
+  def late_check(text)
+    return nil if text.nil?
+    rows = text.scan(
+      /^late-check: late (URGENT|COMMAND) (\d+): inside guest stalls (\d+), inside faults (\d+), outside (\d+)$/
+    )
+    return nil if rows.empty?
+    found = {}
+    %w[URGENT COMMAND].each do |name|
+      found[name] = { :late => 0, :stall => 0, :fault => 0, :outside => 0 }
+    end
+    rows.each do |name, late, stall, fault, outside|
+      found[name][:late] += late.to_i
+      found[name][:stall] += stall.to_i
+      found[name][:fault] += fault.to_i
+      found[name][:outside] += outside.to_i
+    end
+    probe = text.scan(/^late-check: stall probe from -?\d+ ms, stalls over 5 ms (\d+), worst (\d+) ns$/)
+    found[:stalls] = probe.map { |n, _| n.to_i }.inject(0, :+)
+    found[:worst] = probe.map { |_, w| w.to_i }.max || 0
+    found[:missing] = text.scan(/^late-check: FAIL no stall probe output/).length
+    found
+  end
+
+  def late_outside(check)
+    return nil if check.nil?
+    check["URGENT"][:outside] + check["COMMAND"][:outside]
+  end
+
+  # URGENT that were late while the whole guest stood still. They are
+  # set aside from R1, R2, and R10; the thresholds do not change.
+  def excused(scenario)
+    check = @late[scenario]
+    check.nil? ? 0 : check["URGENT"][:stall]
+  end
+
+  # R1 with the D-064 rule: every URGENT is on time, or late inside a
+  # guest stall the probe saw, and none is late outside one.
+  def r1_ok?(row, scenario)
+    return false if row.nil? || accounted(row) < R1_MIN_N
+    outside = late_outside(@late[scenario])
+    return false if !outside.nil? && outside > 0
+    row[:on_time] + excused(scenario) == accounted(row)
+  end
+
+  def excused_text(scenario)
+    n = excused(scenario)
+    n > 0 ? "; late inside guest stalls #{n}" : ""
+  end
+
+  def print_late_lines(logs)
+    logs.each do |scenario, text|
+      next if text.nil?
+      text.scan(/^late-check: (?:FAIL )?late (?:URGENT|COMMAND) \d+ .*$/).each do |line|
+        puts "#{scenario} #{line}"
+      end
+    end
+  end
+
+  def add_late_row(scenario)
+    check = @late[scenario]
+    if check.nil? || check[:missing] > 0
+      add(scenario, "late",
+          "late check missing: no stall probe output, late URGENT and COMMAND cannot be told apart",
+          FAIL)
+      return
+    end
+    parts = %w[URGENT COMMAND].map do |name|
+      c = check[name]
+      "#{name} late #{c[:late]}: inside guest stalls #{c[:stall]}, " \
+        "inside faults #{c[:fault]}, outside #{c[:outside]}"
+    end
+    outside = late_outside(check)
+    add(scenario, "late",
+        "#{parts.join('; ')}; guest stalls over 5 ms #{check[:stalls]}, " \
+        "worst #{check[:worst]} ns; threshold outside 0",
+        outside == 0 ? PASS : FAIL)
+  end
+
   def p99_ns(item)
     return nil if item.nil?
     text = item[:p99].to_s
@@ -220,9 +306,9 @@ class ScenarioReport
     urgent = sums["URGENT"]
     den = accounted(urgent)
     share = den == 0 ? "missing" : "#{urgent[:on_time]}/#{den}"
-    verdict = all_on_time?(urgent) ? PASS : FAIL
+    verdict = r1_ok?(urgent, "S1") ? PASS : FAIL
     add("S1", "R1",
-        "URGENT on time #{share}; threshold 1 and n >= #{R1_MIN_N}",
+        "URGENT on time #{share}#{excused_text('S1')}; threshold 1 and n >= #{R1_MIN_N}",
         verdict)
 
     detail = %w[URGENT COMMAND BACKGROUND].map do |name|
@@ -261,6 +347,7 @@ class ScenarioReport
     numbers = "path #{path ? 'yes' : 'no'}; #{counts}; states #{states(text).uniq.join(',')}"
     numbers += "; #{problems.join('; ')}" unless problems.empty?
     add("S1", "checks", numbers, verdict)
+    add_late_row("S1")
   end
 
   def fill_s2(text, latency_text, calm, calm_latency)
@@ -268,11 +355,11 @@ class ScenarioReport
     flood_urgent = series(latency_text, "URGENT")
     calm_share = fraction_text(summaries(calm)["URGENT"])
     flood_share = fraction_text(summaries(text)["URGENT"])
-    share_ok = all_on_time?(summaries(text)["URGENT"]) &&
-               all_on_time?(summaries(calm)["URGENT"])
+    share_ok = r1_ok?(summaries(text)["URGENT"], "S2") &&
+               r1_ok?(summaries(calm)["URGENT"], "S1")
     add("S2", "R2 share",
-        "URGENT on time flood #{flood_share} against S1 #{calm_share}; " \
-        "threshold 1 and n >= #{R1_MIN_N}",
+        "URGENT on time flood #{flood_share}#{excused_text('S2')} against S1 " \
+        "#{calm_share}#{excused_text('S1')}; threshold 1 and n >= #{R1_MIN_N}",
         share_ok ? PASS : FAIL)
 
     if flood_urgent.nil? || calm_urgent.nil?
@@ -280,10 +367,19 @@ class ScenarioReport
     else
       limit_2x = calm_urgent[:median] * 2
       p99 = p99_ns(flood_urgent)
+      # An URGENT above the deadline is late. When every such URGENT
+      # was on its way during a guest stall, the samples left are all
+      # within the deadline, so p99 and max of those meet it (D-064).
+      flood_row = summaries(text)["URGENT"]
+      above = flood_row ? flood_row[:late] : 0
+      set_aside = above > 0 && excused("S2") == above &&
+                  late_outside(@late["S2"]) == 0
+      within = !p99.nil? &&
+               ((p99 <= URGENT_DEADLINE_NS && flood_urgent[:max] <= URGENT_DEADLINE_NS) ||
+                set_aside)
       ok = flood_urgent[:median] <= limit_2x &&
            flood_urgent[:n] >= R1_MIN_N &&
-           !p99.nil? && p99 <= URGENT_DEADLINE_NS &&
-           flood_urgent[:max] <= URGENT_DEADLINE_NS
+           within
       if !@r2_max.nil? && flood_urgent[:median] > @r2_max
         ok = false
       end
@@ -292,7 +388,8 @@ class ScenarioReport
           "URGENT median #{flood_urgent[:median]} ns; S1 median #{calm_urgent[:median]} ns" \
           "#{extra}; threshold 2x S1 #{limit_2x} ns; " \
           "p99 #{flood_urgent[:p99]}; max #{flood_urgent[:max]} ns; " \
-          "deadline #{URGENT_DEADLINE_NS} ns; n #{flood_urgent[:n]}",
+          "deadline #{URGENT_DEADLINE_NS} ns; n #{flood_urgent[:n]}" \
+          "#{set_aside ? "; above the deadline #{above}, each inside a guest stall" : ''}",
           ok ? PASS : FAIL)
     end
 
@@ -357,6 +454,7 @@ class ScenarioReport
               "drop thirds #{thirds ? thirds.join('/') : 'missing'}"
     numbers += "; #{problems.join('; ')}" unless problems.empty?
     add("S2", "checks", numbers, problems.empty? ? PASS : FAIL)
+    add_late_row("S2")
   end
 
   def s3_sections(text)
@@ -435,6 +533,7 @@ class ScenarioReport
     add("S3", "checks",
         problems.empty? ? "four faults and URGENT silent observed" : problems.join("; "),
         problems.empty? ? PASS : FAIL)
+    add_late_row("S3")
   end
 
   def fill_s4(text, latency_text, calm, calm_latency)
@@ -447,16 +546,21 @@ class ScenarioReport
     else
       median_delta = fault_lat[:median] - calm_lat[:median]
       max_delta = fault_lat[:max] - calm_lat[:max]
-      ok = all_on_time?(calm_row) && all_on_time?(fault_row) &&
+      # With late URGENT inside guest stalls set aside, each max is at
+      # most the deadline, so the max delta is too (D-064).
+      set_aside = excused("S1") + excused("S4") > 0
+      ok = r1_ok?(calm_row, "S1") && r1_ok?(fault_row, "S4") &&
            median_delta.abs <= R10_MEDIAN_DELTA_NS &&
-           max_delta.abs <= URGENT_DEADLINE_NS
+           (max_delta.abs <= URGENT_DEADLINE_NS || set_aside)
       add("S4", "R10",
-          "R1 S1 #{fraction_text(calm_row)} S4 #{fraction_text(fault_row)}; " \
+          "R1 S1 #{fraction_text(calm_row)}#{excused_text('S1')} " \
+          "S4 #{fraction_text(fault_row)}#{excused_text('S4')}; " \
           "R3 URGENT median delta #{median_delta} ns; " \
           "max delta #{max_delta} ns; " \
           "S4 median #{fault_lat[:median]} ns max #{fault_lat[:max]} ns; " \
           "threshold fraction equal, |median delta| <= #{R10_MEDIAN_DELTA_NS} ns, " \
-          "|max delta| <= #{URGENT_DEADLINE_NS} ns",
+          "|max delta| <= #{URGENT_DEADLINE_NS} ns" \
+          "#{set_aside ? ' without the URGENT late inside guest stalls' : ''}",
           ok ? PASS : FAIL)
     end
 
@@ -475,6 +579,7 @@ class ScenarioReport
     add("S4", "checks",
         problems.empty? ? "panel and telemetry killed during a #{s4_seconds} s window" : problems.join("; "),
         problems.empty? ? PASS : FAIL)
+    add_late_row("S4")
   end
 
   def print_table

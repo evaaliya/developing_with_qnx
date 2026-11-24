@@ -33,6 +33,7 @@ slay -Q -f sink >/dev/null 2>&1 || true
 rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out \
     /tmp/dev-status.txt /tmp/dev-status-again.txt
 
+/tmp/qnx-late-check.sh start $((FLOOD_S + 120)) || fail "the stall probe did not start"
 /tmp/sink 64 1500 > /tmp/sink.out 2>&1 &
 sink_pid=$!
 /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
@@ -113,12 +114,12 @@ for c in URGENT COMMAND BACKGROUND; do
     [ "$issued" = "${booked:-x}" ] || fail "$c issued $issued but the sink totals hold ${booked:-none}"
 done
 grep -c 'sink: state DEGRADED' /tmp/sink.out | sed 's/^/long-flood: DEGRADED entries /'
-grep 'class URGENT late' /tmp/sink.out || true
 [ "$source_status" -eq 0 ] || fail "source exit $source_status"
 [ "$sink_status" -eq 0 ] || fail "sink exit $sink_status"
 grep 'sink: unaccounted 0' /tmp/sink.out >/dev/null || fail "unaccounted is not 0"
-grep 'sink: summary URGENT .*late 0' /tmp/sink.out >/dev/null || fail "URGENT was late"
-grep 'sink: summary COMMAND .*late 0' /tmp/sink.out >/dev/null || fail "COMMAND was late"
+# Each late URGENT or COMMAND must be inside a guest stall (D-064).
+/tmp/qnx-late-check.sh check long-flood ||
+    fail "a late URGENT or COMMAND was not inside a guest stall"
 grep 'sink: summary URGENT .*lost 0, dropped 0' /tmp/sink.out >/dev/null || fail "URGENT was lost or dropped"
 grep 'sink: summary COMMAND .*lost 0, dropped 0' /tmp/sink.out >/dev/null || fail "COMMAND was lost or dropped"
 if grep 'dropped signal' /tmp/relay-a.out | grep -v 'class BACKGROUND' >/dev/null 2>&1; then

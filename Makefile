@@ -83,6 +83,7 @@ test: build/latency-report
 	./build/test-telemetry
 	./build/test-books
 	./build/test-node-store
+	sh tests/test_late_check.sh
 	/usr/bin/ruby tests/test_panel.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
@@ -103,8 +104,10 @@ clean:
 
 upload: default
 	$(SSH) root@localhost "slay -Q -f supervisor >/dev/null 2>&1 || true; slay -Q -f telemetry >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true"
-	$(SCP) ./build/source ./build/sink ./build/relay ./build/supervisor ./build/telemetry root@localhost:/tmp/
-	$(SCP) ./scripts/qnx-scenario.sh root@localhost:/tmp/qnx-scenario.sh
+	$(SSH) root@localhost "slay -Q -f stall-probe >/dev/null 2>&1 || true"
+	$(SCP) ./build/source ./build/sink ./build/relay ./build/supervisor ./build/telemetry ./build/stall-probe root@localhost:/tmp/
+	$(SCP) ./scripts/qnx-scenario.sh ./scripts/qnx-late-check.sh root@localhost:/tmp/
+	$(SSH) root@localhost "chmod +x /tmp/stall-probe /tmp/qnx-late-check.sh /tmp/qnx-scenario.sh"
 
 run: upload
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND)'
@@ -133,7 +136,6 @@ run-long-flood: upload
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-flood.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-flood.sh 60'
 
 run-long-live: upload
-	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
 	$(SCP) ./scripts/qnx-long-live.sh root@localhost:/tmp/qnx-long-live.sh
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-live.sh /tmp/stall-probe /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-live.sh 600'
 
@@ -141,7 +143,6 @@ run-long-live: upload
 RESTART_S ?= 300
 RESTART_PLAN ?= all
 run-live-restart: upload
-	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
 	$(SCP) ./scripts/qnx-live-restart.sh root@localhost:/tmp/qnx-live-restart.sh
 	bash scripts/live-restart-check.sh $(RESTART_S) $(RESTART_PLAN)
 
@@ -204,7 +205,10 @@ measure: upload build/latency-report
 	echo "=== calm ==="; \
 	./build/latency-report build/measure/calm-*.log; \
 	echo "=== flood ==="; \
-	./build/latency-report build/measure/flood-*.log
+	./build/latency-report build/measure/flood-*.log; \
+	echo "=== late (D-064) ==="; \
+	grep -h -E '^late-check: late (URGENT|COMMAND) [0-9]+ inside' build/measure/calm-*.log build/measure/flood-*.log || true; \
+	awk '/^late-check: late URGENT or COMMAND inside/ { s += $$9; f += $$12; o += $$14; n++ } END { printf "measure: late URGENT or COMMAND in %d runs: inside guest stalls %d, inside faults %d, outside %d\n", n, s, f, o }' build/measure/calm-*.log build/measure/flood-*.log
 
 stall-check: upload build/latency-report
 	mkdir -p build/stall
