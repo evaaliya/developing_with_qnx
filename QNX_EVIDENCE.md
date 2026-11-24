@@ -1675,3 +1675,136 @@ S1 against S2, same run, full latency in nanoseconds:
 | unaccounted | 0 | 0 |
 
 Under the flood, BACKGROUND waits about 12 times longer and loses 1955 signals. URGENT stays inside its 31 ms deadline, and no URGENT or COMMAND is dropped. This is one run, not a measurement series.
+
+## 2026-11-24 16:22 +06 · panel buttons, a flood that keeps room, and send time limits
+
+Three changes, all checked on the guest from 16:22 to 16:28 +06 with one build:
+
+```text
+7bf7188a4e99e43ad84d6883f7eafa5b7d007782  source
+3e901b5837c1b584a92cc472742b16f1b2e64f33  relay
+8b583e7419467fae9c5a9be3cef1d7f0edbbb896  sink
+```
+
+- **Panel buttons.** The host panel has four buttons: Flood on, Flood off, Mute URGENT, Restore URGENT. Each one is a POST to the panel server, which writes one fixed line to `/dev/signal-source` over the same ssh the Makefile uses (port 2222, batch mode). Only those four commands exist; `stop` is refused. The server listens on 127.0.0.1 only and refuses a POST without the page's own header, Origin, and Host. The mode on the page still comes from telemetry, not from the button.
+- **Flood budget.** The issued list holds 12288 numbers. The flood may use all but the last 2048. When it reaches that point it turns itself off, prints one line, and `flood on` is refused for the rest of the run with `error flood budget used`. The reserve is about 38 s of the live schedule (53 signals a second). Before this, a flood longer than about 8 s filled the list and every class stopped.
+- **Send time limits.** Every `MsgSend` in source now has a 5 s limit set with `TimerTimeout` on the calling thread (the manifest has 20 s). It replaces `alarm()`, which is aimed at the whole process. The flood batch had no limit at all. A batch that relay A has already received waits for a reply, and on a `name_attach` channel the limit then only asks relay A to unblock the sender. A stopped relay never answers, so source waits at most 6 s for the flood thread, then ends the run without it. The process finishes exiting when relay A dies, as the supervisor would make it.
+
+### Commands and results
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 732 PASS, 0 FAIL |
+| `make scenarios` | 0 | `scenarios failed 0`, table below |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry` | 0 each | `unaccounted 0` in each; `run-dev` dropped 931 |
+| `make run-long-flood` | 0 | flood held 20 s, URGENT 804/804 and COMMAND 26/26 on time, `unaccounted 0` |
+| `make run-flood-hang` | 0 | both variants: source gave up 25 s after relay A stopped, exit 1, 0 s after relay A died |
+| `make panel-check` | 0 | four buttons, each mode seen in telemetry, `unaccounted 0` |
+| `make measure` (N=34) | 0 | 68 logs, each `unaccounted 0`; R5 0; URGENT flood median 841000 ns |
+
+### Scenarios
+
+```text
+S1 | R1 | URGENT on time 213/213; threshold 1 and n >= 100 | прошёл
+S1 | R3 | URGENT n 213 median 2072992 ns p99 4423008 ns max 6634992 ns; COMMAND n 7 median 4367008 ns p99 n/a max 11350000 ns; BACKGROUND n 11 median 4656992 ns p99 n/a max 9826000 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 213 COMMAND 7 BACKGROUND 11; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 221/221 against S1 213/213; threshold 1 and n >= 100 | прошёл
+S2 | R2 median | URGENT median 1009008 ns; S1 median 2072992 ns; threshold 2x S1 4145984 ns; p99 5006992 ns; max 6404000 ns; deadline 31000000 ns; n 221 | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 2241; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 2; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 6564; flood signals 6552; window ms 5000; duration ns 5042812992; span ns 5040624992; drop thirds 751/784/706 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2149510000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 3268795008 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 213/213 S4 199/199; R3 URGENT median delta -12992 ns; max delta 287008 ns; S4 median 2060000 ns max 6922000 ns; threshold fraction equal, |median delta| <= 5000000 ns, |max delta| <= 31000000 ns | прошёл
+S4 | checks | panel and telemetry killed during a 5 s window | прошёл
+scenarios failed 0
+```
+
+### Long flood
+
+`make run-long-flood` turns the flood on and holds it for 20 s, then reads `/dev/signal-source`, tries `flood on` again, and stops. The large logs are read only after the network stops (see the note below).
+
+```text
+long-flood: source: flood budget used at 10243 of 12288 issued numbers, 2048 kept for the live schedule; flood off (D-061)
+long-flood: flood on after the budget refused; error flood budget used
+long-flood: URGENT sent after the budget 484
+sink: summary URGENT received 804, on time 804, late 0, lost 0, dropped 0
+sink: summary COMMAND received 26, on time 26, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 6957, on time 6929, late 28, lost 0, dropped 2980
+sink: unaccounted 0
+long-flood: PASS
+```
+
+The flood itself lasted about 7 s of the 20 s (138 batches of 72 at 50 ms); the rest of the window ran the normal schedule.
+
+Note. In the first run of this check the script ran `awk` over the 20 000-line source log while the network was still running. Two URGENT arrived late (67084000 ns and 44376992 ns), both just before `stop`. With the reads moved after the stop, three runs had no late URGENT. The likely cause is that the nodes print every signal to files in `/tmp`, and a large read of the same files competes with them. This was not measured further.
+
+### Relay A stops during the flood
+
+`make run-flood-hang` stops relay A with `SIGSTOP` one second after `flood on`, first with URGENT on, then with URGENT muted.
+
+```text
+flood-hang: variant urgent
+flood-hang: /dev/signal-source answered while relay A was stopped
+flood-hang: source gave up 25 s after the stop
+flood-hang: the flood thread was not stuck in a send
+flood-hang: source exit 1, 0 s after relay A died
+flood-hang: PASS urgent
+flood-hang: variant mute
+flood-hang: /dev/signal-source answered while relay A was stopped
+source: the next node did not take a BACKGROUND batch within 5 s; the flood thread stops
+flood-hang: source gave up 25 s after the stop
+flood-hang: the flood thread was the one stuck
+flood-hang: source exit 1, 0 s after relay A died
+flood-hang: PASS mute
+```
+
+Which send gets stuck first depends on timing. An earlier run of the same command printed the third case:
+
+```text
+source: the flood thread is still waiting for the next node after 6 s; ending the run without it
+```
+
+### Panel buttons
+
+`make panel-check` starts the live network with telemetry, starts the panel, and sends each button's POST:
+
+```text
+panel-check: buttons on the page 4
+panel-check: pressed flood-on: HTTP 200, 16:27:29 sent "flood on"; the mode above comes from telemetry
+panel-check: telemetry shows mode flood after flood-on
+panel-check: pressed flood-off: HTTP 200, 16:27:30 sent "flood off"; the mode above comes from telemetry
+panel-check: telemetry shows mode normal after flood-off
+panel-check: pressed mute: HTTP 200, 16:27:30 sent "mute"; the mode above comes from telemetry
+panel-check: telemetry shows mode mute after mute
+panel-check: pressed restore: HTTP 200, 16:27:30 sent "restore"; the mode above comes from telemetry
+panel-check: telemetry shows mode normal after restore
+panel-check: POST without the panel header: HTTP 403
+panel-check: stop: HTTP 400, 16:27:31 refused: unknown command stop
+panel-check: guest network exit 0
+panel-check: sink: summary URGENT received 80, on time 80, late 0, lost 0, dropped 0
+panel-check: sink: summary COMMAND received 4, on time 4, late 0, lost 0, dropped 0
+panel-check: sink: summary BACKGROUND received 288, on time 238, late 50, lost 0, dropped 365
+panel-check: PASS
+```
+
+With the guest stopped (the QEMU process paused with `SIGSTOP` for 5 s at 16:21:46 and then continued), Flood on returned HTTP 502 and the page showed the error:
+
+```text
+16:21:51 "flood on" failed: Connection timed out during banner exchange
+Connection to 127.0.0.1 port 2222 timed out
+```
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
