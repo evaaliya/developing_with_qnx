@@ -85,11 +85,20 @@ fi
 start=$(date +%s)
 echo "live-restart: plan $PLAN, start $start, running ${RUN_S} s, K $K"
 events > /tmp/live-restart-plan.txt
+mode_after=
 t=0
 while [ "$t" -lt "$RUN_S" ]; do
     sleep 1
     t=$(( $(date +%s) - start ))
     kill -0 "$sup" >/dev/null 2>&1 || break
+    # Every source kill in the plan comes while the flood is on: the
+    # restarted source must be in flood mode again (D-065).
+    if [ -z "$mode_after" ] && grep 'kill source pid' /tmp/live-restart-events.txt >/dev/null 2>&1 &&
+        grep '^supervisor: restarted source pid=' /tmp/supervisor.out >/dev/null 2>&1 &&
+        [ -e /dev/signal-source ]; then
+        mode_after=$(grep '^mode ' /dev/signal-source 2>/dev/null | cut -d' ' -f2)
+        [ -n "$mode_after" ] && echo "source-restart mode $mode_after at $t" >> /tmp/live-restart-events.txt
+    fi
     while read -r at what arg1 arg2; do
         [ "$t" -ge "$at" ] || continue
         grep "^$at " /tmp/live-restart-events.txt >/dev/null 2>&1 && continue
@@ -140,7 +149,7 @@ sed 's/^/live-restart: event /' /tmp/live-restart-events.txt 2>/dev/null || true
 echo "--- supervisor ---"
 grep -v ' progress, streak cleared' /tmp/supervisor.out || true
 echo "--- source (state lines) ---"
-grep -E '^source: (resum|reopen|relay|link|issued|sent [0-9]|sent manifest|the |flood stopped|closes are)|failed|not ' /tmp/source.out | head -60 || true
+grep -E '^source: (resum|reopen|relay|link|issued|sent [0-9]|sent manifest|the |flood stopped|closes are|restored|mode of)|failed|not ' /tmp/source.out | head -60 || true
 for r in a b; do
     echo "--- relay $r (state lines) ---"
     grep -E 'resum|link down|reopened|not back|failed|full|kept|boosts|repicks' /tmp/relay-$r.out | head -40 || true
@@ -179,6 +188,14 @@ for n in $nodes; do
     c=$(grep -c "^supervisor: restarted $n pid=" /tmp/supervisor.out || true)
     [ "$c" -eq 1 ]; check $? "$n restarted once (restarts $c)"
 done
+case " $nodes " in
+*" source "*)
+    grep '^source: restored the mode of the dead source: flood$' /tmp/source.out >/dev/null
+    check $? "the restarted source printed that it took the flood back"
+    [ "$mode_after" = flood ]
+    check $? "the restarted source is in flood mode (mode ${mode_after:-not read})"
+    ;;
+esac
 c=$(grep -c '^supervisor: restarted ' /tmp/supervisor.out || true)
 k=$(echo $nodes | wc -w | tr -d ' ')
 [ "$c" -eq "$k" ]; check $? "no restart besides the kills ($c restarts, $k kills)"

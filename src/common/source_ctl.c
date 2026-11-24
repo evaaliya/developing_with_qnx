@@ -221,3 +221,57 @@ unsigned source_flood_room(unsigned long recorded, unsigned long cap,
     room = limit - recorded;
     return room < want ? (unsigned)room : want;
 }
+
+static const char *mode_name(int flood, int urgent_on)
+{
+    if (flood && !urgent_on) {
+        return "flood+mute";
+    }
+    if (flood) {
+        return "flood";
+    }
+    if (!urgent_on) {
+        return "mute";
+    }
+    return "normal";
+}
+
+enum source_mode_restore source_ctl_restore_mode(struct source_control *ctl,
+                                                 int known, int flood,
+                                                 int urgent_on,
+                                                 unsigned long waiting,
+                                                 unsigned long cap,
+                                                 char *line, size_t line_cap)
+{
+    char scratch[8];
+
+    if (line == NULL || line_cap == 0) {
+        line = scratch;
+        line_cap = sizeof scratch;
+    }
+    if (ctl == NULL || !known) {
+        if (ctl != NULL) {
+            ctl->flood = 0;
+            ctl->urgent_on = 1;
+        }
+        snprintf(line, line_cap,
+                 "source: the book of the dead source holds no mode; "
+                 "mode is normal");
+        return SOURCE_RESTORE_UNKNOWN;
+    }
+    ctl->urgent_on = urgent_on ? 1 : 0;
+    if (flood && source_flood_room(waiting, cap, 1) == 0) {
+        ctl->flood = 0;
+        snprintf(line, line_cap,
+                 "source: mode of the dead source was %s; flood stays off: "
+                 "%lu of %lu issued numbers wait to be closed and %u are kept "
+                 "for the live schedule; mode is %s",
+                 mode_name(1, ctl->urgent_on), waiting, cap,
+                 (unsigned)SOURCE_FLOOD_RESERVE, mode_name(0, ctl->urgent_on));
+        return SOURCE_RESTORE_NO_FLOOD;
+    }
+    ctl->flood = flood ? 1 : 0;
+    snprintf(line, line_cap, "source: restored the mode of the dead source: %s",
+             mode_name(ctl->flood, ctl->urgent_on));
+    return SOURCE_RESTORE_ALL;
+}

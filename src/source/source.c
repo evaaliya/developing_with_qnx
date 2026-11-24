@@ -56,6 +56,12 @@ static void ctl_unlock(void)
 static int telemetry_on;
 /* Telemetry reads these; the live book sets them (D-063). */
 static unsigned g_books_resumes;
+/*
+ * The live book for the mode word. Set right after the book is opened,
+ * before /dev/signal-source takes commands; g_live is cleared later
+ * (D-065). NULL in counted mode.
+ */
+static struct live_book *g_mode_book;
 static int g_books_reset;
 static unsigned live_waiting(void);
 
@@ -468,6 +474,10 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
 
     ctl_lock();
     status = source_ctl_apply(&g_ctl, text);
+    if (status == 0) {
+        /* A restarted source takes this mode back (D-065). */
+        live_book_set_mode(g_mode_book, g_ctl.flood, g_ctl.urgent_on);
+    }
     ctl_unlock();
     if (status != 0) {
         return EINVAL;
@@ -779,6 +789,7 @@ static int send_flood_batch(unsigned count)
         g_ctl.flood = 0;
         snprintf(g_ctl.error, sizeof g_ctl.error,
                  "flood stopped: %u signals wait to be closed", waiting);
+        live_book_set_mode(g_mode_book, g_ctl.flood, g_ctl.urgent_on);
         ctl_unlock();
         printf("source: flood stopped, %u of %u issued numbers wait to be "
                "closed, %u kept for the live schedule (D-062)\n",
@@ -1078,8 +1089,17 @@ static struct live_book *open_book(int resume)
                r.journal_redone ? "; finished a close the dead source began" : "",
                r.next_moved ? "; its last number was on the book but not sent "
                               "for sure" : "");
-        printf("source: the mode of the dead source (flood or mute) is not "
-               "restored; mode is normal\n");
+        {
+            char line[256];
+
+            /* The mode of the dead source, or why not (D-065). */
+            (void)source_ctl_restore_mode(&g_ctl, r.mode_known, r.flood,
+                                          r.urgent_on, r.waiting,
+                                          SIGNAL_MANIFEST_CAP, line,
+                                          sizeof line);
+            live_book_set_mode(book, g_ctl.flood, g_ctl.urgent_on);
+            printf("%s\n", line);
+        }
         fflush(stdout);
         return book;
     }
@@ -1124,6 +1144,7 @@ static int run_live(int argc, char **argv)
     }
     source_ctl_init(&g_ctl, 1);
     book = open_book(resume);
+    g_mode_book = book;
     open_telemetry();
     if (pin_cpu0() != 0) {
         return EXIT_FAILURE;

@@ -86,4 +86,30 @@ unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns);
 unsigned source_flood_room(unsigned long waiting, unsigned long cap,
                            unsigned want);
 
+/* What came back of the dead source's mode (D-065). */
+enum source_mode_restore {
+    /* The whole mode is back (normal, flood, mute, or flood+mute). */
+    SOURCE_RESTORE_ALL = 0,
+    /* Mute came back, flood did not: there was no room for it. */
+    SOURCE_RESTORE_NO_FLOOD = 1,
+    /* The book held no mode: the mode is normal. */
+    SOURCE_RESTORE_UNKNOWN = 2
+};
+
+/*
+ * A restarted source takes the mode the dead one left in its book.
+ * known is 0 when the book held no mode. Flood comes back only when
+ * source_flood_room would let it issue at least one signal with waiting
+ * numbers not closed yet out of cap; otherwise it would stop itself at
+ * once, so it stays off and the line says why. stop, the issued counts,
+ * and error are not touched. line gets one English sentence for the log
+ * (may be NULL). A NULL ctl is SOURCE_RESTORE_UNKNOWN.
+ */
+enum source_mode_restore source_ctl_restore_mode(struct source_control *ctl,
+                                                 int known, int flood,
+                                                 int urgent_on,
+                                                 unsigned long waiting,
+                                                 unsigned long cap,
+                                                 char *line, size_t line_cap);
+
 #endif

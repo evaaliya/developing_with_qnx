@@ -149,6 +149,59 @@ static void live_book_tests(void)
              SIGNAL_MANIFEST_CAP + 1);
 }
 
+/* The mode of the dead source comes back with its book (D-065). */
+static void live_book_mode_tests(void)
+{
+    struct live_book_resume r;
+    uint64_t number;
+
+    live_book_init(&book);
+    (void)live_book_take(&book, SIGNAL_CLASS_URGENT, 1, &number);
+    after = book;
+    expect_u("mode: fresh books resume", (unsigned)live_book_resume(&after, &r), 0);
+    expect_u("mode: fresh books hold a mode", (unsigned)r.mode_known, 1);
+    expect_u("mode: fresh books are normal (no flood)", (unsigned)r.flood, 0);
+    expect_u("mode: fresh books are normal (urgent on)", (unsigned)r.urgent_on, 1);
+
+    live_book_set_mode(&book, 1, 1);
+    after = book;
+    (void)live_book_resume(&after, &r);
+    expect_u("mode: flood comes back", (unsigned)r.flood, 1);
+    expect_u("mode: flood keeps urgent on", (unsigned)r.urgent_on, 1);
+
+    live_book_set_mode(&book, 0, 0);
+    after = book;
+    (void)live_book_resume(&after, &r);
+    expect_u("mode: mute comes back (no flood)", (unsigned)r.flood, 0);
+    expect_u("mode: mute comes back (urgent off)", (unsigned)r.urgent_on, 0);
+
+    live_book_set_mode(&book, 1, 0);
+    after = book;
+    (void)live_book_resume(&after, &r);
+    expect_u("mode: flood+mute comes back", (unsigned)(r.flood && !r.urgent_on), 1);
+
+    /* A word a source did not write: the numbers resume, the mode is unknown. */
+    after = book;
+    after.mode = 0;
+    expect_u("mode: an unset word still resumes the numbers",
+             (unsigned)live_book_resume(&after, &r), 0);
+    expect_u("mode: an unset word is not known", (unsigned)r.mode_known, 0);
+    expect_u("mode: unknown reads as urgent on", (unsigned)r.urgent_on, 1);
+    after = book;
+    after.mode = LIVE_BOOK_MODE_SET | 0x80u;
+    (void)live_book_resume(&after, &r);
+    expect_u("mode: stray bits are not known", (unsigned)r.mode_known, 0);
+
+    /* A version 1 book (no mode word) is not taken over. */
+    after = book;
+    after.version = 1u;
+    expect_u("mode: a version 1 book is not resumed",
+             (unsigned)(live_book_resume(&after, &r) != 0), 1);
+
+    live_book_set_mode(NULL, 1, 1);
+    expect_u("mode: a NULL book is ignored", 1, 1);
+}
+
 static void counts(const struct signal_ledger *l, uint32_t c, unsigned out[4])
 {
     signal_ledger_counts(l, c, &out[0], &out[1], &out[2], &out[3]);
@@ -364,6 +417,7 @@ static void drop_book_tests(void)
 int main(void)
 {
     live_book_tests();
+    live_book_mode_tests();
     ledger_tests();
     drop_book_tests();
     if (failures != 0) {

@@ -287,6 +287,89 @@ int main(void)
     expect_int("flood on is accepted again after the flood stopped itself",
                source_ctl_apply(&ctl, "flood on"), 0);
 
+    /* A restarted source takes the dead source's mode (D-065). */
+    {
+        char line[256];
+        unsigned long cap = 12288; /* SIGNAL_MANIFEST_CAP */
+
+        source_ctl_init(&ctl, 1);
+        expect_int("restore: flood comes back",
+                   (int)source_ctl_restore_mode(&ctl, 1, 1, 1, 1200, cap,
+                                                line, sizeof line),
+                   SOURCE_RESTORE_ALL);
+        expect_int("restore: flood is on", ctl.flood, 1);
+        expect_int("restore: urgent stays on", ctl.urgent_on, 1);
+        expect_text("restore: flood line", line,
+                    "source: restored the mode of the dead source: flood");
+
+        source_ctl_init(&ctl, 1);
+        expect_int("restore: mute comes back",
+                   (int)source_ctl_restore_mode(&ctl, 1, 0, 0, 0, cap,
+                                                line, sizeof line),
+                   SOURCE_RESTORE_ALL);
+        expect_int("restore: urgent is off", ctl.urgent_on, 0);
+        expect_text("restore: mute line", line,
+                    "source: restored the mode of the dead source: mute");
+
+        source_ctl_init(&ctl, 1);
+        (void)source_ctl_restore_mode(&ctl, 1, 1, 0, 10, cap, line, sizeof line);
+        expect_text("restore: flood+mute line", line,
+                    "source: restored the mode of the dead source: flood+mute");
+
+        source_ctl_init(&ctl, 1);
+        expect_int("restore: normal comes back as normal",
+                   (int)source_ctl_restore_mode(&ctl, 1, 0, 1, 0, cap,
+                                                line, sizeof line),
+                   SOURCE_RESTORE_ALL);
+        expect_text("restore: normal line", line,
+                    "source: restored the mode of the dead source: normal");
+
+        /* No room: the flood would stop itself at once. */
+        source_ctl_init(&ctl, 1);
+        expect_int("restore: no flood room keeps flood off",
+                   (int)source_ctl_restore_mode(&ctl, 1, 1, 0,
+                                                cap - SOURCE_FLOOD_RESERVE, cap,
+                                                line, sizeof line),
+                   SOURCE_RESTORE_NO_FLOOD);
+        expect_int("restore: flood off without room", ctl.flood, 0);
+        expect_int("restore: mute still comes back", ctl.urgent_on, 0);
+        expect_text("restore: no room line", line,
+                    "source: mode of the dead source was flood+mute; flood "
+                    "stays off: 10240 of 12288 issued numbers wait to be "
+                    "closed and 2048 are kept for the live schedule; mode is "
+                    "mute");
+
+        /* One number of room is enough. */
+        source_ctl_init(&ctl, 1);
+        expect_int("restore: one free number lets flood back",
+                   (int)source_ctl_restore_mode(&ctl, 1, 1, 1,
+                                                cap - SOURCE_FLOOD_RESERVE - 1,
+                                                cap, line, sizeof line),
+                   SOURCE_RESTORE_ALL);
+
+        source_ctl_init(&ctl, 1);
+        ctl.flood = 1;
+        expect_int("restore: unknown mode",
+                   (int)source_ctl_restore_mode(&ctl, 0, 1, 0, 0, cap,
+                                                line, sizeof line),
+                   SOURCE_RESTORE_UNKNOWN);
+        expect_int("restore: unknown is normal (flood off)", ctl.flood, 0);
+        expect_int("restore: unknown is normal (urgent on)", ctl.urgent_on, 1);
+        expect_text("restore: unknown line", line,
+                    "source: the book of the dead source holds no mode; mode "
+                    "is normal");
+
+        source_ctl_init(&ctl, 1);
+        ctl.stop = 1;
+        ctl.issued_urgent = 7;
+        (void)source_ctl_restore_mode(&ctl, 1, 1, 1, 0, cap, NULL, 0);
+        expect_int("restore: stop is not touched", ctl.stop, 1);
+        expect_int("restore: counts are not touched", (int)ctl.issued_urgent, 7);
+        expect_int("restore: NULL ctl",
+                   (int)source_ctl_restore_mode(NULL, 1, 1, 1, 0, cap, NULL, 0),
+                   SOURCE_RESTORE_UNKNOWN);
+    }
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

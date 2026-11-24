@@ -25,6 +25,23 @@ void live_book_init(struct live_book *book)
     book->version = LIVE_BOOK_VERSION;
     book->size = (uint32_t)sizeof *book;
     book->next = 1;
+    book->mode = LIVE_BOOK_MODE_SET;
+}
+
+void live_book_set_mode(struct live_book *book, int flood, int urgent_on)
+{
+    uint32_t mode = LIVE_BOOK_MODE_SET;
+
+    if (book == NULL) {
+        return;
+    }
+    if (flood) {
+        mode |= LIVE_BOOK_MODE_FLOOD;
+    }
+    if (!urgent_on) {
+        mode |= LIVE_BOOK_MODE_MUTE;
+    }
+    __atomic_store_n(&book->mode, mode, __ATOMIC_RELEASE);
 }
 
 int live_book_take(struct live_book *book, uint32_t class_id, int64_t now_ns,
@@ -142,6 +159,20 @@ int live_book_resume(struct live_book *book, struct live_book_resume *out)
     if (last >= book->next) {
         book->next = last + 1;
         out->next_moved = 1;
+    }
+    {
+        uint32_t mode = __atomic_load_n(&book->mode, __ATOMIC_ACQUIRE);
+        uint32_t known = LIVE_BOOK_MODE_SET | LIVE_BOOK_MODE_FLOOD |
+                         LIVE_BOOK_MODE_MUTE;
+
+        /* A word with other bits is not a mode a source wrote. */
+        if ((mode & LIVE_BOOK_MODE_SET) != 0 && (mode & ~known) == 0) {
+            out->mode_known = 1;
+            out->flood = (mode & LIVE_BOOK_MODE_FLOOD) != 0;
+            out->urgent_on = (mode & LIVE_BOOK_MODE_MUTE) == 0;
+        } else {
+            out->urgent_on = 1;
+        }
     }
     book->resumes++;
     out->next = book->next;
