@@ -1927,3 +1927,131 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-24 20:31 +06 · killed nodes of the live network keep the books
+
+Before this change a node killed in the live network under `supervisor -L` took its books with it (quiet logs, a flood, one kill, 60 s each):
+
+- **source:** the restarted source numbered from 1 again. sink printed `signal N was already accounted` 45 times, then `the close repeats signal 1`, and exited with status 1. The supervisor restarted a sink nobody had killed, and the new sink started with empty books. The final summary held only the numbers issued after the restart (URGENT 1248), so `unaccounted 0` and "issued equals the sink totals" passed only because both sides had lost the start of the run. The dead source's open numbers were never closed.
+- **relay A:** source got `Bad file descriptor` on its next send and exited with status 1; from there it went as above, three restarts for one kill.
+- **relay B:** the books stayed whole (relay A's queue was counted lost), but 11 URGENT were late outside guest stalls.
+- **sink:** the new sink started with empty books; URGENT issued 2364, on the sink totals 1274 + 128 lost. 15 URGENT were late outside guest stalls: a close with about 900 losses held the only sink thread for 111–128 ms, because each `lost signal` line was flushed on its own.
+
+Now (decision D-063):
+
+- The books of each node live in a named POSIX shared memory object that outlives the process: the source's ring of issued numbers, next number, and closed totals; the sink's ledger; each relay's list of dropped numbers. The supervisor starts a restarted node with `-r`, and it goes on from the dead node's books. A node started without `-r` begins new books.
+- source puts a number on its book before it sends it. A number whose send did not finish stays there and is closed as lost if it did not arrive. A restarted source continues after the last number, closes the dead source's open numbers, and continues the issued totals per class.
+- A kill can land between any two writes. A single entry has one commit (the count is written after the item); updates of several fields go through a redo journal that a restarted node finishes. A restarted sink counts every total again from its slots.
+- sink accepts a close it has already applied (a dead source never got the answer) and keeps the accounts it gave.
+- source survives the death of relay A: on `ESRCH` or `EBADF` the number stays on the book, nothing is issued until `name_open` finds the new relay A, and source then prints how much was not issued.
+- sink flushes `lost signal` lines once per close.
+- The panel shows a books line: how many source and sink restarts the books survived and how many issued numbers wait to be closed. A restart without books would be a red banner.
+
+What does not survive a kill: the queue of a killed relay (its numbers are counted lost), the sink's network state and latency window (back to INIT), and the source mode (a restarted source is in normal mode, not flood or mute).
+
+One build for every result below, 2026-11-24 20:31–21:00 +06:
+
+```text
+6fd9431db4c8289a5e147df3fbd8d6baaca0269a  source
+0fa74595630fa136a32b9d129bbb3f41db957067  relay
+091498f7f04df18e6a8ab16b383d52ea3bee9c75  sink
+997bb3c90ddeb4d0b407edec15135ca2cf77b650  supervisor
+c4aca02b8f247513eea57ae44fbdcca07c7f6976  telemetry
+65a63fd70853c8cb9acaaad2ad411f2f7ff906b2  stall-probe
+```
+
+### Commands and results
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 962 PASS, 0 FAIL |
+| `make scenarios` | 2, 2, 0 | failed twice on late URGENT, passed the third time; see below |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `panel-check` | 0 each | `unaccounted 0` in each |
+| `make run-flood-hang` | 0 | source gave up 26 s after relay A stopped, exit 1, 0 s after relay A died |
+| `make run-long-flood` | 2, 0 | first try: one URGENT late (44 ms, 30 ms of it source to relay A); second try passed |
+| `make measure` (N=34) | 0 | 68 logs, each `unaccounted 0`; R5 0; URGENT median calm 1091504 ns, flood 1003992 ns |
+| `make run-long-live` | 0 | 600 s, 169288 signals, `unaccounted 0`; 13 late URGENT or COMMAND, each inside a guest stall |
+| `make run-live-restart` | 0 | 300 s, four kills, below |
+
+### Late URGENT outside the live checks
+
+The first `make scenarios` failed on one late URGENT in S2 (61.8 ms, 60.7 ms of it between source and relay A). The second failed on S1, with no flood: one URGENT took 122.9 ms, spread over all three hops (31.5, 72.8, 18.6 ms), so S1 R1, S2 R2, and S4 R10 failed. These two checks do not run the stall probe. The third run had `stall-probe` beside it: the probe, at priority 31 above every signal class, woke more than 5 ms late 42 times in about 66 s, at worst 33 ms, and the scenarios passed. The measurement in the same build shows no slower first hop: URGENT under flood, source to relay A, median 128000 ns, maximum 304000 ns. That fits whole-guest stops, as in the live checks, where every late URGENT fell inside one; for these two runs it is not proven.
+
+Earlier in the session, before this build, the guest kernel stopped during `make run-dev` (serial console: `Shutdown`, `kernel persona`, in `nto_time`). After a restart of QEMU the same `run-dev` passed, and every run above comes after that restart.
+
+### Scenarios (third run)
+
+```text
+S1 | R1 | URGENT on time 196/196; threshold 1 and n >= 100 | прошёл
+S1 | R3 | URGENT n 196 median 1529000 ns p99 2647008 ns max 2666000 ns; COMMAND n 7 median 1406000 ns p99 n/a max 2572000 ns; BACKGROUND n 11 median 2316992 ns p99 n/a max 5497008 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 196 COMMAND 7 BACKGROUND 11; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 216/216 against S1 196/196; threshold 1 and n >= 100 | прошёл
+S2 | R2 median | URGENT median 1400504 ns; S1 median 1529000 ns; threshold 2x S1 3058000 ns; p99 10000992 ns; max 12732992 ns; deadline 31000000 ns; n 216 | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 3698; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 1; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 6564; flood signals 6552; window ms 5000; duration ns 5047128000; span ns 5035452992; drop thirds 1216/1249/1233 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2261652000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 3331405008 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 196/196 S4 203/203; R3 URGENT median delta -183000 ns; max delta 1346000 ns; S4 median 1346000 ns max 4012000 ns; threshold fraction equal, |median delta| <= 5000000 ns, |max delta| <= 31000000 ns | прошёл
+S4 | checks | panel and telemetry killed during a 5 s window | прошёл
+scenarios failed 0
+```
+
+### Five minutes with four kills
+
+`make run-live-restart`: `supervisor -k 3 -w 1500 -L`, quiet logs, `stall-probe` beside it, the host panel read every 2 s. Flood on at 20 s; relay A killed at 40 s, relay B at 70 s, sink at 100 s, source at 130 s (all with the flood on); flood off at 160 s, on at 180 s, off at 210 s; mute at 230 s, restore at 240 s; stop at 300 s.
+
+```text
+supervisor: restarted relay-a pid=51687450
+supervisor: restarted relay-b pid=52654104
+supervisor: restarted sink pid=53809177
+supervisor: restarted source pid=55136283
+source: signal-relay-a is gone (signal 26144: No such process); numbers on the book are closed as lost if they did not arrive, and nothing is issued until it is back
+source: reopened signal-relay-a after 2029 ms; 82 scheduled signals and 35 flood batches were not issued while it was gone
+relay signal-relay-a: resumed the books of a dead relay (resume 1): 168 dropped numbers kept; its queue is lost and source closes those numbers as lost
+relay signal-relay-b: resumed the books of a dead relay (resume 1): 0 dropped numbers kept; its queue is lost and source closes those numbers as lost
+sink: resumed the books of a dead sink (resume 1)
+sink: books kept URGENT on time 3662, late 9, lost 79, dropped 0
+sink: books kept COMMAND on time 119, late 0, lost 3, dropped 0
+sink: books kept BACKGROUND on time 80985, late 473, lost 2559, dropped 11447
+source: resumed the book of a dead source (resume 1): next 136541, 1269 numbers wait to be closed, issued URGENT 4873 COMMAND 159 BACKGROUND 131508
+source: sent 178729 signals
+source: issued URGENT 10952 COMMAND 368 BACKGROUND 167409
+sink: summary URGENT received 10795, on time 10786, late 9, lost 157, dropped 0
+sink: summary COMMAND received 362, on time 362, late 0, lost 6, dropped 0
+sink: summary BACKGROUND received 142667, on time 142031, late 636, lost 4837, dropped 19905
+sink: unaccounted 0
+live-restart: URGENT issued 10952, on the sink totals 10952
+live-restart: COMMAND issued 368, on the sink totals 368
+live-restart: BACKGROUND issued 167409, on the sink totals 167409
+live-restart: late URGENT or COMMAND inside guest stalls 9, outside 0
+live-restart: ok   no restart besides the kills (4 restarts, 4 kills)
+live-restart: ok   restart limit K=3 not reached (no LOCKED_SAFE)
+live-restart: PASS
+```
+
+The numbers lost when relay A and relay B were killed are the ones the relays printed: relay A 2636 `lost signal` lines, relay B 2359, sink 5000. The logs of the five processes took 1.06 MB.
+
+The panel, sampled 153 times, showed each of the four nodes with one restart, never showed a books reset, and showed both books kept. Last current sample before the stop:
+
+```text
+books kept across restarts: source 1, sink 1; 44 issued numbers wait to be closed
+live-restart-check: panel URGENT issued minus accounted 0, waiting 44
+live-restart-check: panel COMMAND issued minus accounted 0, waiting 44
+live-restart-check: panel BACKGROUND issued minus accounted 0, waiting 44
+live-restart-check: PASS
+```
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
