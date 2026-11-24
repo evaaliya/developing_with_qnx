@@ -34,3 +34,5 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/telemetry \
     src/common/latency_stats.c src/common/net_state.c \
     src/common/signal_msg.c -lsocket
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/stall-probe src/stall-probe/stall_probe.c
+# Test tool: a next node that takes one URGENT and never answers (F-033).
+ntoaarch64-gcc "${CFLAGS[@]}" -o build/hold-next tests/qnx/hold_next.c

@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang panel-check measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -157,6 +157,12 @@ run-live-restart: upload
 run-flood-hang: upload
 	$(SCP) ./scripts/qnx-flood-hang.sh root@localhost:/tmp/qnx-flood-hang.sh
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-flood-hang.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-flood-hang.sh urgent && /tmp/qnx-flood-hang.sh mute'
+
+# source must end its run when the next node takes an URGENT and never
+# answers (F-033, D-071).
+run-hold-urgent: upload
+	$(SCP) ./build/hold-next ./scripts/qnx-hold-urgent.sh root@localhost:/tmp/
+	$(SSH) root@localhost 'chmod +x /tmp/hold-next /tmp/qnx-hold-urgent.sh /tmp/source; /tmp/qnx-hold-urgent.sh'
 
 panel-check: upload
 	bash scripts/panel-check.sh
