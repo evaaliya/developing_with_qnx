@@ -16,6 +16,7 @@ fail() {
     cat /tmp/relay-b.out 2>/dev/null || true
     echo "--- sink ---"
     cat /tmp/sink.out 2>/dev/null || true
+    /tmp/qnx-late-check.sh check late-check || true
     exit 1
 }
 
@@ -122,13 +123,33 @@ fi
 if grep 'dropped signal' /tmp/relay-a.out | grep -v 'class BACKGROUND' >/dev/null 2>&1; then
     fail "a dropped signal was not BACKGROUND"
 fi
+# A late URGENT puts the sink in SAFE, as it should. Before mute that is
+# allowed only when a late URGENT came first; the late check at the end
+# fails the run unless that URGENT was inside a guest stall (D-064).
 if grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
-    fail "SAFE before urgent was stopped"
+    if ! awk '
+        /^sink: late signal [0-9]+ class URGENT / { late = 1 }
+        /^sink: state SAFE/ { exit late ? 0 : 1 }
+    ' /tmp/sink.out; then
+        fail "SAFE before urgent was stopped, and no late URGENT came first"
+    fi
+    echo "scenario: SAFE before mute after a late URGENT; the late check decides"
+    i=0
+    while [ "$i" -lt 30 ]; do
+        last=$(grep '^sink: state ' /tmp/sink.out | tail -1 | cut -d' ' -f3)
+        [ "$last" = NORMAL ] || [ "$last" = DEGRADED ] && break
+        i=$((i + 1))
+        sleep 0.2
+    done
+    [ "$last" = NORMAL ] || [ "$last" = DEGRADED ] ||
+        fail "the sink did not leave SAFE before mute (state $last)"
 fi
 if ! kill -0 "$source_pid" >/dev/null 2>&1; then
     fail "source died before urgent was stopped"
 fi
 
+# Only state lines after this mark count for mute and restore.
+mute_mark=$(wc -l < /tmp/sink.out | tr -d ' ')
 echo "scenario: command urgent off"
 echo 'urgent off' > /dev/signal-source
 show_status "cat while urgent is off"
@@ -137,13 +158,13 @@ grep '^urgent off$' /tmp/dev-status.txt >/dev/null
 
 i=0
 while [ "$i" -lt 24 ]; do
-    if grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
+    if tail -n +$((mute_mark + 1)) /tmp/sink.out | grep 'sink: state SAFE' >/dev/null 2>&1; then
         break
     fi
     i=$((i + 1))
     sleep 0.25
 done
-if ! grep 'sink: state SAFE' /tmp/sink.out >/dev/null 2>&1; then
+if ! tail -n +$((mute_mark + 1)) /tmp/sink.out | grep 'sink: state SAFE' >/dev/null 2>&1; then
     fail "stopping urgent did not reach SAFE"
 fi
 if ! kill -0 "$source_pid" >/dev/null 2>&1; then
@@ -159,11 +180,11 @@ grep '^urgent on$' /tmp/dev-status.txt >/dev/null
 i=0
 restored=0
 while [ "$i" -lt 40 ]; do
-    if awk '
+    if tail -n +$((mute_mark + 1)) /tmp/sink.out | awk '
         /sink: state SAFE/ { safe = 1 }
         safe && /sink: state NORMAL/ { found = 1 }
         END { exit found ? 0 : 1 }
-    ' /tmp/sink.out; then
+    '; then
         restored=1
         break
     fi
