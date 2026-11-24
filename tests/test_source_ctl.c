@@ -370,6 +370,20 @@ int main(void)
                    SOURCE_RESTORE_UNKNOWN);
     }
 
+    /* A send stuck in REPLY that the time limit cannot free (F-033). */
+    expect_int("stuck: no send in progress",
+               source_send_stuck(0, 9000000000LL, 6000000000LL), 0);
+    expect_int("stuck: a send 5 s old is not stuck",
+               source_send_stuck(1000000000LL, 6000000000LL, 6000000000LL), 0);
+    expect_int("stuck: exactly at the limit is not stuck",
+               source_send_stuck(1000000000LL, 7000000000LL, 6000000000LL), 0);
+    expect_int("stuck: past the limit",
+               source_send_stuck(1000000000LL, 7000000001LL, 6000000000LL), 1);
+    expect_int("stuck: clock before the send start",
+               source_send_stuck(5000000000LL, 1000000000LL, 6000000000LL), 0);
+    expect_int("stuck: negative limit",
+               source_send_stuck(1000000000LL, 9000000000LL, -1), 0);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

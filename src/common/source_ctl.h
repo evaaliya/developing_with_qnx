@@ -112,4 +112,12 @@ enum source_mode_restore source_ctl_restore_mode(struct source_control *ctl,
                                                  unsigned long cap,
                                                  char *line, size_t line_cap);
 
+/*
+ * 1 when a send that began at since_ns has waited longer than limit_ns
+ * at now_ns: the next node took the signal and does not answer, and the
+ * send time limit cannot free it (F-028, F-033). since_ns 0 is no send
+ * in progress. 0 otherwise.
+ */
+int source_send_stuck(int64_t since_ns, int64_t now_ns, int64_t limit_ns);
+
 #endif

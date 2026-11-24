@@ -613,6 +613,25 @@ struct live_state {
 
 static struct live_state g_live;
 
+/*
+ * When the timer thread's current send began (CLOCK_MONOTONIC ns), 0 when
+ * it is not sending. The watch thread reads it to see a send that the
+ * time limit cannot free (F-028, F-033).
+ */
+static int64_t g_timer_send_since_ns;
+/* The first thread to end the live run sets this; the other one waits. */
+static int g_ending;
+static timer_t g_ticker;
+static struct signal_manifest g_manifest;
+
+static int claim_end(void)
+{
+    int expected = 0;
+
+    return __atomic_compare_exchange_n(&g_ending, &expected, 1, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
 /* Numbers that wait to be closed, for telemetry. A read without the lock
    may be one behind; the next report has the next value. */
 static unsigned live_waiting(void)
@@ -717,18 +736,27 @@ static int issue_live(uint32_t class_id)
     source_ctl_note_issued(&g_ctl, class_id);
     ctl_unlock();
     coid = g_live.coid;
+    /*
+     * The number is on the book. Release the lock before the send, as the
+     * flood does (D-060): if the next node takes this signal and never
+     * answers (F-028), the flood and close threads must still reach their
+     * own send time limits instead of waiting for this lock (F-033).
+     */
+    pthread_mutex_unlock(&g_issue_lock);
+    __atomic_store_n(&g_timer_send_since_ns, monotonic_ns(), __ATOMIC_RELEASE);
     rc = send_one(coid, number, class_id);
+    __atomic_store_n(&g_timer_send_since_ns, 0, __ATOMIC_RELEASE);
     if (rc == 1) {
         char what[96];
 
         snprintf(what, sizeof what, "signal %" PRIu64 ": %s", number,
                  strerror(errno));
+        pthread_mutex_lock(&g_issue_lock);
         mark_link_down_locked(coid, what);
         pthread_mutex_unlock(&g_issue_lock);
         publish_source(0);
         return 2;
     }
-    pthread_mutex_unlock(&g_issue_lock);
     if (rc != 0) {
         return -1;
     }
@@ -964,6 +992,8 @@ static int join_flood_thread(void)
 
 static pthread_t g_close_thread;
 static int g_close_started;
+static pthread_t g_watch_thread;
+static int g_watch_started;
 
 /*
  * Every CLOSE_PERIOD_NS, close the numbers issued at least
@@ -1115,19 +1145,158 @@ static struct live_book *open_book(int resume)
     return book;
 }
 
+/*
+ * Ends the live run: stop the flood, close and watch threads (each given
+ * up after the send time limit), stop the timer, and send the manifest
+ * of everything not closed yet. Called by whichever thread claimed the
+ * end: the timer thread, or the watch thread when the timer thread is
+ * stuck in a send (F-033).
+ */
+static int end_live(int failed)
+{
+    struct live_book *book = g_live.book;
+    const char *next_name = g_live.next_name;
+    struct itimerspec spec;
+    unsigned long recorded;
+    int coid;
+
+    pthread_mutex_lock(&g_issue_lock);
+    g_live.stop = 1;
+    if (g_live.failed) {
+        failed = 1;
+    }
+    pthread_mutex_unlock(&g_issue_lock);
+    if (g_flood_started) {
+        if (join_flood_thread() != 0) {
+            failed = 1;
+        }
+        g_flood_started = 0;
+    }
+    if (g_close_started) {
+        if (join_thread(g_close_thread, "close") != 0) {
+            failed = 1;
+        }
+        g_close_started = 0;
+    }
+    if (g_watch_started && !pthread_equal(pthread_self(), g_watch_thread)) {
+        if (join_thread(g_watch_thread, "watch") != 0) {
+            failed = 1;
+        }
+        g_watch_started = 0;
+    }
+
+    memset(&spec, 0, sizeof spec);
+    if (timer_settime(g_ticker, 0, &spec, NULL) == -1) {
+        fprintf(stderr, "source: stopping the timer failed: %s\n",
+                strerror(errno));
+        failed = 1;
+    }
+    /* The manifest closes whatever the close thread had not closed yet. */
+    recorded = issued_ring_all(&book->ring, g_manifest.item,
+                               SIGNAL_MANIFEST_CAP);
+    coid = g_live.coid;
+    if (g_live.link_down) {
+        fprintf(stderr, "source: %s is gone at the end; the manifest of %lu "
+                "signals cannot be sent and stays on the book\n",
+                next_name, recorded);
+        return EXIT_FAILURE;
+    }
+    if (send_manifest(coid, &g_manifest, recorded) != 0) {
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    /* sink has every number now and a clean exit is not restarted. */
+    live_book_close_front(book, recorded);
+    if (node_store_remove(LIVE_BOOK_STORE) != 0) {
+        fprintf(stderr, "source: removing %s failed: %s\n", LIVE_BOOK_STORE,
+                strerror(errno));
+    }
+    if (name_close(coid) == -1) {
+        fprintf(stderr, "source: closing the connection to %s failed: %s\n",
+                next_name, strerror(errno));
+        return EXIT_FAILURE;
+    }
+    printf("source: sent %llu signals\n", (unsigned long long)(book->next - 1));
+    ctl_lock();
+    printf("source: issued URGENT %llu COMMAND %llu BACKGROUND %llu\n",
+           (unsigned long long)g_ctl.issued_urgent,
+           (unsigned long long)g_ctl.issued_command,
+           (unsigned long long)g_ctl.issued_background);
+    ctl_unlock();
+    fflush(stdout);
+    return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+/*
+ * Every 250 ms: is the timer thread stuck in a send? The send time limit
+ * frees a send the next node has not taken. A send it took waits for the
+ * reply, and on a name_attach channel the limit only asks the node to
+ * unblock it; a stopped node never does (F-028). The timer thread is the
+ * one that ends the run, so without this the run would never end and
+ * the flood and close threads would never be given up (F-033). COMMAND
+ * priority, so the flood does not hold it off.
+ */
+static void *watch_thread(void *arg)
+{
+    struct timespec pause;
+    const int64_t limit = ((int64_t)SEND_TIMEOUT_SECONDS + 1) * 1000000000LL;
+
+    (void)arg;
+    if (pin_cpu0() != 0 || set_fifo(SIGNAL_PRIO_COMMAND) != 0) {
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return NULL;
+    }
+    memset(&pause, 0, sizeof pause);
+    pause.tv_nsec = (long)CLOSE_PERIOD_NS;
+    for (;;) {
+        int64_t since;
+        int64_t now;
+        int stop;
+
+        nanosleep(&pause, NULL);
+        pthread_mutex_lock(&g_issue_lock);
+        stop = g_live.stop;
+        pthread_mutex_unlock(&g_issue_lock);
+        if (stop) {
+            break;
+        }
+        since = __atomic_load_n(&g_timer_send_since_ns, __ATOMIC_ACQUIRE);
+        now = monotonic_ns();
+        if (!source_send_stuck(since, now, limit)) {
+            continue;
+        }
+        if (!claim_end()) {
+            break;
+        }
+        fprintf(stderr, "source: a signal sent %lld ms ago has no reply: %s "
+                "took it and does not answer, and the send time limit of %u "
+                "s cannot free it; the timer thread is stuck, the run ends "
+                "without it\n",
+                (long long)((now - since) / 1000000LL), g_live.next_name,
+                SEND_TIMEOUT_SECONDS);
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        (void)end_live(1);
+        fflush(stdout);
+        fflush(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return NULL;
+}
+
 static int run_live(int argc, char **argv)
 {
-    static struct signal_manifest manifest;
     struct live_book *book;
     struct sigevent event;
     struct itimerspec spec;
     int64_t next_ns[3];
-    unsigned long recorded = 0;
     int resume = 0;
     int coid;
     int timer_chid;
     int timer_coid;
-    timer_t ticker;
     int ceiling;
     int full = 0;
     int failed = 0;
@@ -1196,7 +1365,7 @@ static int run_live(int argc, char **argv)
         name_close(coid);
         return EXIT_FAILURE;
     }
-    if (timer_create(CLOCK_MONOTONIC, &event, &ticker) == -1) {
+    if (timer_create(CLOCK_MONOTONIC, &event, &g_ticker) == -1) {
         fprintf(stderr, "source: creating the timer failed: %s\n",
                 strerror(errno));
         name_close(coid);
@@ -1205,7 +1374,7 @@ static int run_live(int argc, char **argv)
     memset(&spec, 0, sizeof spec);
     spec.it_value.tv_nsec = SOURCE_TICK_NS;
     spec.it_interval.tv_nsec = SOURCE_TICK_NS;
-    if (timer_settime(ticker, 0, &spec, NULL) == -1) {
+    if (timer_settime(g_ticker, 0, &spec, NULL) == -1) {
         fprintf(stderr, "source: starting the timer failed: %s\n",
                 strerror(errno));
         name_close(coid);
@@ -1222,8 +1391,8 @@ static int run_live(int argc, char **argv)
            SOURCE_FLOOD_BATCH, SOURCE_FLOOD_BATCH);
     fflush(stdout);
 
-    memset(&manifest, 0, sizeof manifest);
-    manifest.type = SIGNAL_MSG_MANIFEST;
+    memset(&g_manifest, 0, sizeof g_manifest);
+    g_manifest.type = SIGNAL_MSG_MANIFEST;
     next_ns[0] = 0;
     next_ns[1] = 0;
     next_ns[2] = 0;
@@ -1245,6 +1414,13 @@ static int run_live(int argc, char **argv)
         return EXIT_FAILURE;
     }
     g_close_started = 1;
+    if (pthread_create(&g_watch_thread, NULL, watch_thread, NULL) != 0) {
+        fprintf(stderr, "source: creating the watch thread failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    g_watch_started = 1;
 
     for (;;) {
         struct _pulse pulse;
@@ -1356,64 +1532,16 @@ static int run_live(int argc, char **argv)
         }
     }
 
-    pthread_mutex_lock(&g_issue_lock);
-    g_live.stop = 1;
-    if (g_live.failed) {
-        failed = 1;
-    }
-    pthread_mutex_unlock(&g_issue_lock);
-    if (g_flood_started) {
-        if (join_flood_thread() != 0) {
-            failed = 1;
+    if (!claim_end()) {
+        /*
+         * The watch thread is already ending the run: the next node
+         * answered the stuck send late. That thread exits the process.
+         */
+        for (;;) {
+            pause();
         }
-        g_flood_started = 0;
     }
-    if (g_close_started) {
-        if (join_thread(g_close_thread, "close") != 0) {
-            failed = 1;
-        }
-        g_close_started = 0;
-    }
-
-    memset(&spec, 0, sizeof spec);
-    if (timer_settime(ticker, 0, &spec, NULL) == -1) {
-        fprintf(stderr, "source: stopping the timer failed: %s\n",
-                strerror(errno));
-        failed = 1;
-    }
-    /* The manifest closes whatever the close thread had not closed yet. */
-    recorded = issued_ring_all(&book->ring, manifest.item, SIGNAL_MANIFEST_CAP);
-    coid = g_live.coid;
-    if (g_live.link_down) {
-        fprintf(stderr, "source: %s is gone at the end; the manifest of %lu "
-                "signals cannot be sent and stays on the book\n",
-                next_name, recorded);
-        return EXIT_FAILURE;
-    }
-    if (send_manifest(coid, &manifest, recorded) != 0) {
-        name_close(coid);
-        return EXIT_FAILURE;
-    }
-    /* sink has every number now and a clean exit is not restarted. */
-    live_book_close_front(book, recorded);
-    if (node_store_remove(LIVE_BOOK_STORE) != 0) {
-        fprintf(stderr, "source: removing %s failed: %s\n", LIVE_BOOK_STORE,
-                strerror(errno));
-    }
-    if (name_close(coid) == -1) {
-        fprintf(stderr, "source: closing the connection to %s failed: %s\n",
-                next_name, strerror(errno));
-        return EXIT_FAILURE;
-    }
-    printf("source: sent %llu signals\n", (unsigned long long)(book->next - 1));
-    ctl_lock();
-    printf("source: issued URGENT %llu COMMAND %llu BACKGROUND %llu\n",
-           (unsigned long long)g_ctl.issued_urgent,
-           (unsigned long long)g_ctl.issued_command,
-           (unsigned long long)g_ctl.issued_background);
-    ctl_unlock();
-    fflush(stdout);
-    return failed ? EXIT_FAILURE : EXIT_SUCCESS;
+    return end_live(failed);
 }
 
 int main(int argc, char **argv)

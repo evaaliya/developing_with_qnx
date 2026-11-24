@@ -275,3 +275,11 @@ enum source_mode_restore source_ctl_restore_mode(struct source_control *ctl,
              mode_name(ctl->flood, ctl->urgent_on));
     return SOURCE_RESTORE_ALL;
 }
+
+int source_send_stuck(int64_t since_ns, int64_t now_ns, int64_t limit_ns)
+{
+    if (since_ns <= 0 || limit_ns < 0 || now_ns < since_ns) {
+        return 0;
+    }
+    return now_ns - since_ns > limit_ns;
+}

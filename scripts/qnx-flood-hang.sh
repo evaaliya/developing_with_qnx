@@ -14,12 +14,20 @@ esac
 
 fail() {
     echo "flood-hang: FAIL $1" >&2
+    # Thread states first, before any signal or kill changes them (F-033).
+    echo "--- pidin at the failure, before any kill ---"
+    echo "pids: source ${source_pid:-?} relay A ${relay_a:-?} relay B ${relay_b:-?} sink ${sink_pid:-?}"
+    pidin -p source 2>&1 || true
+    pidin -p relay 2>&1 | grep -v '^ *pid' || true
+    pidin -p sink 2>&1 | grep -v '^ *pid' || true
+    echo "--- source (lines that are not single signals) ---"
+    grep -Ev 'signal [0-9]* class|flood signal|flood batch' /tmp/source.out 2>/dev/null | tail -30 || true
+    echo "--- relay A (tail) ---"
+    tail -5 /tmp/relay-a.out 2>/dev/null | cut -c1-300 || true
     slay -Q -f -s SIGCONT relay >/dev/null 2>&1 || true
     slay -Q -f -s SIGKILL source >/dev/null 2>&1 || true
     slay -Q -f relay >/dev/null 2>&1 || true
     slay -Q -f sink >/dev/null 2>&1 || true
-    echo "--- source (tail) ---"
-    grep -Ev 'signal [0-9]* class|flood signal' /tmp/source.out 2>/dev/null | tail -20 || true
     exit 1
 }
 
@@ -72,9 +80,12 @@ fi
 
 # source ends its run on the failure: URGENT or the batch times out in
 # 5 s, the flood thread is given up after 6 s more, and the manifest has
-# 20 s. A thread waiting for a reply from a name_attach channel cannot be
-# torn down until the relay replies or dies, so the process finishes
-# exiting only when relay A is killed, as the supervisor would (D-061).
+# 20 s. If relay A took an URGENT and stopped before its reply, the watch
+# thread of source sees the timer thread stuck after 6 s and ends the
+# run the same way (F-033). A thread waiting for a reply from a
+# name_attach channel cannot be torn down until the relay replies or
+# dies, so the process finishes exiting only when relay A is killed, as
+# the supervisor would (D-061).
 i=0
 while [ "$i" -lt 225 ]; do
     kill -0 "$source_pid" >/dev/null 2>&1 || break
@@ -97,6 +108,11 @@ if grep -E 'did not take a BACKGROUND batch|flood thread is still waiting' /tmp/
     echo "flood-hang: the flood thread was the one stuck"
 else
     echo "flood-hang: the flood thread was not stuck in a send"
+fi
+# relay A took a timer-thread signal and stopped before its reply: the
+# watch thread of source ends the run without the timer thread (F-033).
+if grep 'the timer thread is stuck' /tmp/source.out >/dev/null 2>&1; then
+    echo "flood-hang: the timer thread was stuck waiting for a reply; the watch thread ended the run"
 fi
 
 kill -KILL "$relay_a" >/dev/null 2>&1 || true
