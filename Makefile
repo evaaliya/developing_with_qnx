@@ -31,6 +31,11 @@ FLOOD_QUEUE := 8
 MEASURE_N ?= 34
 # Calm runs with the sink free, then the same number pinned to CPU 0 (D-049).
 STALL_K ?= 20
+# Each make measure and make stall-check keeps its logs in its own
+# directory; build/<check>/latest points at the newest. Nothing is erased.
+RUN_STAMP := $(shell date +%Y%m%d-%H%M%S)
+MEASURE_DIR := build/measure/runs/$(RUN_STAMP)
+STALL_DIR := build/stall/runs/$(RUN_STAMP)
 
 default:
 	mkdir -p build
@@ -161,15 +166,16 @@ run-telemetry: upload
 	./scripts/host-telemetry.py
 
 measure: upload build/latency-report
-	mkdir -p build/measure
-	rm -f build/measure/calm-*.log build/measure/flood-*.log
+	mkdir -p $(MEASURE_DIR)
+	ln -sfn runs/$(RUN_STAMP) build/measure/latest
+	echo "measure: logs in $(MEASURE_DIR)"
 	case '$(MEASURE_N)' in \
 	  ''|*[!0-9]*|0) echo "measure: MEASURE_N must be a positive integer" >&2; exit 2 ;; \
 	esac
 	n='$(MEASURE_N)'; \
 	i=1; \
 	while [ "$$i" -le "$$n" ]; do \
-	  log=$$(printf 'build/measure/calm-%02d.log' "$$i"); \
+	  log=$$(printf '$(MEASURE_DIR)/calm-%02d.log' "$$i"); \
 	  set +e; \
 	  $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) $$i" > "$$log"; \
 	  status=$$?; \
@@ -186,7 +192,7 @@ measure: upload build/latency-report
 	done; \
 	i=1; \
 	while [ "$$i" -le "$$n" ]; do \
-	  log=$$(printf 'build/measure/flood-%02d.log' "$$i"); \
+	  log=$$(printf '$(MEASURE_DIR)/flood-%02d.log' "$$i"); \
 	  set +e; \
 	  $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE) $$i" > "$$log"; \
 	  status=$$?; \
@@ -203,23 +209,24 @@ measure: upload build/latency-report
 	done; \
 	set -e; \
 	echo "=== calm ==="; \
-	./build/latency-report build/measure/calm-*.log; \
+	./build/latency-report $(MEASURE_DIR)/calm-*.log; \
 	echo "=== flood ==="; \
-	./build/latency-report build/measure/flood-*.log; \
+	./build/latency-report $(MEASURE_DIR)/flood-*.log; \
 	echo "=== late (D-064) ==="; \
-	grep -h -E '^late-check: late (URGENT|COMMAND) [0-9]+ inside' build/measure/calm-*.log build/measure/flood-*.log || true; \
-	awk '/^late-check: late URGENT or COMMAND inside/ { s += $$9; f += $$12; o += $$14; n++ } END { printf "measure: late URGENT or COMMAND in %d runs: inside guest stalls %d, inside faults %d, outside %d\n", n, s, f, o }' build/measure/calm-*.log build/measure/flood-*.log
+	grep -h -E '^late-check: late (URGENT|COMMAND) [0-9]+ inside' $(MEASURE_DIR)/calm-*.log $(MEASURE_DIR)/flood-*.log || true; \
+	awk '/^late-check: late URGENT or COMMAND inside/ { s += $$9; f += $$12; o += $$14; n++ } END { printf "measure: late URGENT or COMMAND in %d runs: inside guest stalls %d, inside faults %d, outside %d\n", n, s, f, o }' $(MEASURE_DIR)/calm-*.log $(MEASURE_DIR)/flood-*.log
 
 stall-check: upload build/latency-report
-	mkdir -p build/stall
-	rm -f build/stall/free-*.log build/stall/pinned-*.log
+	mkdir -p $(STALL_DIR)
+	ln -sfn runs/$(RUN_STAMP) build/stall/latest
+	echo "stall-check: logs in $(STALL_DIR)"
 	case '$(STALL_K)' in \
 	  ''|*[!0-9]*|0) echo "stall-check: STALL_K must be a positive integer" >&2; exit 2 ;; \
 	esac
 	k='$(STALL_K)'; \
 	i=1; \
 	while [ "$$i" -le "$$k" ]; do \
-	  log=$$(printf 'build/stall/free-%02d.log' "$$i"); \
+	  log=$$(printf '$(STALL_DIR)/free-%02d.log' "$$i"); \
 	  set +e; \
 	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND)' > "$$log"; \
 	  status=$$?; \
@@ -236,7 +243,7 @@ stall-check: upload build/latency-report
 	done; \
 	i=1; \
 	while [ "$$i" -le "$$k" ]; do \
-	  log=$$(printf 'build/stall/pinned-%02d.log' "$$i"); \
+	  log=$$(printf '$(STALL_DIR)/pinned-%02d.log' "$$i"); \
 	  set +e; \
 	  $(SSH) root@localhost 'chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) pin' > "$$log"; \
 	  status=$$?; \
@@ -253,6 +260,6 @@ stall-check: upload build/latency-report
 	done; \
 	set -e; \
 	echo "=== free ==="; \
-	./build/latency-report --stalls build/stall/free-*.log; \
+	./build/latency-report --stalls $(STALL_DIR)/free-*.log; \
 	echo "=== pinned ==="; \
-	./build/latency-report --stalls build/stall/pinned-*.log
+	./build/latency-report --stalls $(STALL_DIR)/pinned-*.log

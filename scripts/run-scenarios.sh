@@ -6,10 +6,13 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 ssh=(ssh -p 2222 -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes)
 scp=(scp -P 2222 -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes)
-out="$root/build/scenarios"
+# Each run keeps its own logs: build/scenarios/runs/<time>-<pid>/, and
+# build/scenarios/latest points at the newest one. Nothing is erased.
+stamp="$(date +%Y%m%d-%H%M%S)-$$"
+out="$root/build/scenarios/runs/$stamp"
 mkdir -p "$out"
-rm -f "$out"/s1.log "$out"/s2.log "$out"/s3.log "$out"/s4.log \
-    "$out"/s4-marks.txt "$out"/panel-s4.log
+ln -sfn "runs/$stamp" "$root/build/scenarios/latest"
+echo "scenarios: logs in build/scenarios/runs/$stamp"
 
 "${scp[@]}" \
     "$root/scripts/qnx-scenario.sh" \
@@ -73,5 +76,12 @@ echo "scenario-host: guest exit $s4_status" >> "$out/s4.log"
 cat "$out/s4-marks.txt" >> "$out/s4.log"
 echo "s4 guest exit $s4_status"
 
+set +e
 /usr/bin/ruby "$root/scripts/scenario_report.rb" \
-    "$out/s1.log" "$out/s2.log" "$out/s3.log" "$out/s4.log"
+    "$out/s1.log" "$out/s2.log" "$out/s3.log" "$out/s4.log" \
+    > "$out/report.txt" 2>&1
+report_status=$?
+set -e
+cat "$out/report.txt"
+echo "scenarios: logs in build/scenarios/runs/$stamp"
+exit "$report_status"
