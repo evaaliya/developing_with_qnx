@@ -1808,3 +1808,122 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-24 18:18 +06 · a live run with no length limit
+
+Before this change the live source kept every issued number for one manifest at the end of the run. The list held 12288 numbers, so a live run stopped issuing after about 230 s (53 signals a second), and a flood after about 7 s.
+
+Now the books are closed while the network runs:
+
+- Every 250 ms source sends a **close** for the numbers it issued at least 1 s ago (at most 1024 per close). Each relay passes the close on from its own thread at BACKGROUND priority, outside the signal queue, and marks the numbers it dropped. sink puts them on the books: each number has arrived, was dropped, or is counted as lost. A loss that arrives later still replaces the loss. source forgets the numbers only after sink has them; a close that fails is sent again.
+- The sink ledger is a ring of 12288 slots with whole-run totals per class. A slot is reused only after its number is settled. Telemetry reads the totals instead of walking the ledger on every signal.
+- The flood reserve of 2048 now counts only numbers that are not closed yet. In these runs at most 1413 were waiting, so the flood held for as long as it was on.
+- With `SIGNAL_QUIET=1` the nodes skip the line per signal and keep states, closes, losses, late signals, and totals. A minute of flood with a line per signal filled the guest's `/tmp` (62 MB) in the first try of the 60 s check (`No space left on device`).
+- `stall-probe` is a thread on CPU 0 at priority 31, above every signal class. It wakes every 10 ms and prints each wake-up that came late by more than the threshold, so a late signal can be checked against moments when the whole guest stopped.
+
+One build for every result below, 2026-11-24 18:18–18:36 +06:
+
+```text
+9e72f53b6ed9edacfc89c367c6b65434fe53247d  source
+9982b7209d081cb14fd1f79495c96bbda5befe82  relay
+c537eccc95f8cea9803dd116635c33e904e18d5e  sink
+65a63fd70853c8cb9acaaad2ad411f2f7ff906b2  stall-probe
+```
+
+### Commands and results
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 784 PASS, 0 FAIL |
+| `make scenarios` | 0 | `scenarios failed 0`, table below |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `panel-check` | 0 each | `unaccounted 0` in each; `run-dev` dropped 719 |
+| `make run-flood-hang` | 0 | both variants: source gave up 25 s after relay A stopped, exit 1, 0 s after relay A died |
+| `make run-long-flood` | 0 | flood held 60 s; issued per class equals the sink totals; `unaccounted 0` |
+| `make measure` (N=34) | 0 | 68 logs, each `unaccounted 0`; R5 0; URGENT flood median 835000 ns |
+| `make run-long-live` | 0 | 600 s, 172083 signals, `unaccounted 0`; 6 late URGENT, each inside a guest stall |
+
+### Scenarios
+
+```text
+S1 | R1 | URGENT on time 199/199; threshold 1 and n >= 100 | прошёл
+S1 | R3 | URGENT n 199 median 2247008 ns p99 7454000 ns max 9502992 ns; COMMAND n 7 median 3570000 ns p99 n/a max 6845008 ns; BACKGROUND n 11 median 4400000 ns p99 n/a max 10894000 ns | порога нет
+S1 | R4 | unaccounted 0; threshold 0 | прошёл
+S1 | checks | path yes; URGENT 199 COMMAND 7 BACKGROUND 11; states INIT,NORMAL | прошёл
+S2 | R2 share | URGENT on time flood 223/223 against S1 199/199; threshold 1 and n >= 100 | прошёл
+S2 | R2 median | URGENT median 1026992 ns; S1 median 2247008 ns; threshold 2x S1 4494016 ns; p99 4938992 ns; max 5502000 ns; deadline 31000000 ns; n 223 | прошёл
+S2 | R4 | unaccounted 0; dropped URGENT 0 COMMAND 0 BACKGROUND 2313; threshold unaccounted 0 and URGENT 0 and COMMAND 0 | прошёл
+S2 | R5 | violations 0; threshold 31 | прошёл
+S2 | checks | BACKGROUND issued 6564; flood signals 6552; window ms 5000; duration ns 5037272000; span ns 5044618000; drop thirds 770/734/809 | прошёл
+S3 | R8 kill relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 stop relay B | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 kill source | SAFE yes; unaccounted 0 | порога нет
+S3 | R8 K crashes | LOCKED_SAFE yes; unaccounted 0 | порога нет
+S3 | URGENT silent | SAFE yes; source alive yes | порога нет
+S3 | R6 | one run, not a measurement; kill to SAFE 2180680000 ns | порога нет
+S3 | R7 | one run, not a measurement; kill to fresh URGENT 3033446000 ns | порога нет
+S3 | R9 | LOCKED_SAFE yes | порога нет
+S3 | checks | four faults and URGENT silent observed | прошёл
+S4 | R10 | R1 S1 199/199 S4 196/196; R3 URGENT median delta -91008 ns; max delta -3113984 ns; S4 median 2156000 ns max 6389008 ns; threshold fraction equal, |median delta| <= 5000000 ns, |max delta| <= 31000000 ns | прошёл
+S4 | checks | panel and telemetry killed during a 5 s window | прошёл
+scenarios failed 0
+```
+
+### 60 s flood
+
+```text
+long-flood: flood on, held 60 s
+long-flood: closes 236
+long-flood: most numbers waiting to close 1413
+long-flood: URGENT issued 2417, on the sink totals 2417
+long-flood: COMMAND issued 76, on the sink totals 76
+long-flood: BACKGROUND issued 76298, on the sink totals 76298
+long-flood: PASS
+```
+
+The logs of the four nodes took 147 KB in all.
+
+### Ten minutes of the live network
+
+`make run-long-live`: flood on at 60 s and off at 120 s, mute at 240 s, restore at 250 s, flood on at 300 s and off at 360 s, stop at 600 s.
+
+```text
+long-live: ran 600 s, source exit 0, sink exit 0
+long-live: closes 2318
+long-live: most numbers waiting to close 1340
+long-live: source: sent 172083 signals
+long-live: source: issued URGENT 22839 COMMAND 745 BACKGROUND 148499
+sink: summary URGENT received 22839, on time 22833, late 6, lost 0, dropped 0
+sink: summary COMMAND received 745, on time 745, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 131941, on time 131940, late 1, lost 0, dropped 16558
+sink: unaccounted 0
+long-live: late 81619 URGENT inside a guest stall of 27 ms at 151227416 ms
+long-live: late 81620 URGENT inside a guest stall of 27 ms at 151227416 ms
+long-live: late 82161 URGENT inside a guest stall of 60 ms at 151240430 ms
+long-live: late 82503 URGENT inside a guest stall of 9 ms at 151248654 ms
+long-live: late 82949 URGENT inside a guest stall of 25 ms at 151259314 ms
+long-live: late 82952 URGENT inside a guest stall of 18 ms at 151259397 ms
+long-live: late URGENT or COMMAND inside guest stalls 6, outside 0
+long-live: PASS
+```
+
+The logs took 0.8 MB of the 62 MB. sink handled 2318 closes, on average in 140776 ns and at most 5174000 ns.
+
+The probe saw 229 late wake-ups over 5 ms in this run, 22 of them over 20 ms, the worst 91 ms. The six late URGENT came between 199 s and 231 s, in the calm part between the two floods. "Inside a guest stall" means that the signal's way from source to sink overlaps a moment when the probe, above every class, could not run. It does not prove that the stall caused the whole delay: signal 82503 was 71 ms late and overlapped a 9 ms stall. Every late URGENT also moved sink to SAFE for a moment; the one longer SAFE is the mute at 241 s.
+
+Three earlier 10-minute runs during this work are not counted as passes. Before the probe existed, two runs had 3 and 6 late URGENT; the second also had 1 late COMMAND. With the probe at 20 ms, a third had 9 late URGENT. 4 of them overlapped a stall over 20 ms; 5 did not, including 4 within 150 ms during the second flood. That is why the threshold went down to 5 ms. The 10-minute check passes only if every late URGENT or COMMAND overlaps a stall.
+
+### Panel
+
+After each button the panel now reads `mode` and `error` back from `/dev/signal-source`, so a flood that source turned off again shows its reason next to the button:
+
+```text
+panel-check: pressed flood-on: HTTP 200, 18:23:53 sent "flood on" (source: mode flood; error none); the mode above comes from telemetry
+panel-check: pressed flood-off: HTTP 200, 18:23:54 sent "flood off" (source: mode normal; error none); the mode above comes from telemetry
+panel-check: PASS
+```
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
