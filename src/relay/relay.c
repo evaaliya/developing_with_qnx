@@ -2,6 +2,7 @@
 
 #include "close_list.h"
 #include "drop_book.h"
+#include "drop_notes.h"
 #include "node_store.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
@@ -65,6 +66,14 @@ struct relay {
     int close_waiting;
     rcvid_t close_rcvid;
     struct signal_close close;
+    /*
+     * Drop lines and drop notices the receive thread hands to the notice
+     * thread, so it never prints or sends while an URGENT may wait (D-069).
+     */
+    pthread_t noticer;
+    pthread_mutex_t notice_lock;
+    pthread_cond_t notice_ready;
+    struct drop_notes *notes;
 };
 
 static int set_fifo(const char *who, int priority)
@@ -217,14 +226,19 @@ static void write_lost(const struct relay *node, const struct signal *sig)
     fflush(stdout);
 }
 
-/* Receive thread only. The forward thread reads the marked manifest. */
+/*
+ * Receive thread only. The forward thread reads the marked manifest.
+ * The line is printed by the notice thread with the time of the drop.
+ */
 static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
 {
     if (!signal_log_quiet()) {
-        printf("relay %s: dropped signal %" PRIu64 " class %s at %lld ns\n",
-               node->own_name, number, signal_class_name(class_id),
-               (long long)monotonic_ns(node->own_name));
-        fflush(stdout);
+        int64_t at_ns = monotonic_ns(node->own_name);
+
+        pthread_mutex_lock(&node->notice_lock);
+        (void)drop_notes_add(node->notes, number, class_id, at_ns);
+        pthread_cond_signal(&node->notice_ready);
+        pthread_mutex_unlock(&node->notice_lock);
     }
     pthread_mutex_lock(&node->drop_lock);
     if (drop_book_add(node->drops, number) != 0) {
@@ -655,9 +669,18 @@ static int enqueue(struct relay *node, const struct signal *sig, int64_t arrival
     return rc;
 }
 
-/* Tell the next node now. The manifest still closes the books later. */
-static void announce_dropped(struct relay *node, uint64_t number,
-                             uint32_t class_id);
+/*
+ * Receive thread: ask the notice thread to tell the next node about a
+ * drop. The manifest still closes the books later.
+ */
+static void want_drop_notice(struct relay *node, uint64_t number,
+                             uint32_t class_id)
+{
+    pthread_mutex_lock(&node->notice_lock);
+    (void)drop_notes_want_announce(node->notes, class_id, number);
+    pthread_cond_signal(&node->notice_ready);
+    pthread_mutex_unlock(&node->notice_lock);
+}
 
 /*
  * One MsgSend carries a batch of BACKGROUND. Every signal is admitted
@@ -758,10 +781,12 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
     /*
      * One notice per batch is enough to move sink to DEGRADED; the
      * manifest still marks every dropped number. One MsgSend per drop
-     * kept this receive thread away from URGENT for a whole batch (D-060).
+     * kept this receive thread away from URGENT for a whole batch (D-060);
+     * even one, sent from here, held the next URGENT until relay B took
+     * it, so the notice thread sends it (D-069).
      */
     if (dropped_n > 0) {
-        announce_dropped(node, dropped[0].number, dropped[0].class_id);
+        want_drop_notice(node, dropped[0].number, dropped[0].class_id);
     }
     if (set_fifo(node->own_name, node->own_priority) != 0) {
         return -1;
@@ -769,8 +794,8 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
     return 0;
 }
 
-/* Tell the next node now. The manifest still closes the books later. */
-static void announce_dropped(struct relay *node, uint64_t number,
+/* Notice thread: tell the next node now. */
+static void send_drop_notice(struct relay *node, uint64_t number,
                              uint32_t class_id)
 {
     struct signal_dropped notice;
@@ -801,6 +826,59 @@ static void announce_dropped(struct relay *node, uint64_t number,
                 PRIu64 " with status %ld\n",
                 node->own_name, number, sent);
     }
+}
+
+/*
+ * Prints the drop lines the receive thread recorded, with the time of
+ * each drop and one flush per turn, and sends the drop notices. At
+ * BACKGROUND priority: the lines and notices may wait; an URGENT at the
+ * receive thread may not (D-069).
+ */
+static void *notice_main(void *arg)
+{
+    static struct drop_note lines[DROP_NOTES_CAP];
+    struct relay *node = arg;
+
+    if (pin_cpu0(node->own_name) != 0 ||
+        set_fifo(node->own_name, SIGNAL_PRIO_BACKGROUND) != 0) {
+        exit(EXIT_FAILURE);
+    }
+    for (;;) {
+        unsigned n;
+        unsigned i;
+        unsigned announce;
+        unsigned long missed;
+        uint64_t first[3];
+
+        pthread_mutex_lock(&node->notice_lock);
+        while (!drop_notes_pending(node->notes)) {
+            pthread_cond_wait(&node->notice_ready, &node->notice_lock);
+        }
+        n = drop_notes_take(node->notes, lines, DROP_NOTES_CAP, &missed);
+        announce = drop_notes_take_announce(node->notes, first);
+        pthread_mutex_unlock(&node->notice_lock);
+
+        for (i = 0; i < n; i++) {
+            printf("relay %s: dropped signal %" PRIu64 " class %s at %lld ns\n",
+                   node->own_name, lines[i].number,
+                   signal_class_name(lines[i].class_id),
+                   (long long)lines[i].at_ns);
+        }
+        if (missed > 0) {
+            printf("relay %s: %lu drop lines were not printed: the line "
+                   "buffer of %u was full; the drop book still has them\n",
+                   node->own_name, missed, DROP_NOTES_CAP);
+        }
+        if (n > 0 || missed > 0) {
+            fflush(stdout);
+        }
+        for (i = 0; i < 3; i++) {
+            if (announce & (1u << i)) {
+                send_drop_notice(node, first[i], (uint32_t)(i + 1));
+            }
+        }
+    }
+    return NULL;
 }
 
 static int name_ok(const char *name)
@@ -959,6 +1037,14 @@ int main(int argc, char **argv)
     pthread_cond_init(&node.ready, NULL);
     pthread_mutex_init(&node.drop_lock, NULL);
     pthread_cond_init(&node.close_ready, NULL);
+    {
+        static struct drop_notes notes;
+
+        drop_notes_init(&notes);
+        node.notes = &notes;
+    }
+    pthread_mutex_init(&node.notice_lock, NULL);
+    pthread_cond_init(&node.notice_ready, NULL);
     node.next_order = 1;
     node.drops = open_drops(own_name, resume);
 
@@ -1022,6 +1108,13 @@ int main(int argc, char **argv)
     create_rc = pthread_create(&node.closer, NULL, close_main, &node);
     if (create_rc != 0) {
         fprintf(stderr, "relay %s: could not start the close thread: %s\n",
+                node.own_name, strerror(create_rc));
+        name_detach(attach, 0);
+        return EXIT_FAILURE;
+    }
+    create_rc = pthread_create(&node.noticer, NULL, notice_main, &node);
+    if (create_rc != 0) {
+        fprintf(stderr, "relay %s: could not start the notice thread: %s\n",
                 node.own_name, strerror(create_rc));
         name_detach(attach, 0);
         return EXIT_FAILURE;
@@ -1187,7 +1280,7 @@ int main(int argc, char **argv)
                         node.own_name, strerror(errno));
                 return EXIT_FAILURE;
             }
-            announce_dropped(&node, buffer.dropped.number,
+            want_drop_notice(&node, buffer.dropped.number,
                              buffer.dropped.class_id);
             continue;
         }

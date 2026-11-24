@@ -75,6 +75,8 @@ test: build/latency-report
 		src/common/signal_ledger.c src/common/drop_book.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-node-store \
 		tests/test_node_store.c src/common/node_store.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-drop-notes \
+		tests/test_drop_notes.c src/common/drop_notes.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
@@ -88,6 +90,7 @@ test: build/latency-report
 	./build/test-telemetry
 	./build/test-books
 	./build/test-node-store
+	./build/test-drop-notes
 	sh tests/test_late_check.sh
 	/usr/bin/ruby tests/test_panel.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
