@@ -788,9 +788,6 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
     if (dropped_n > 0) {
         want_drop_notice(node, dropped[0].number, dropped[0].class_id);
     }
-    if (set_fifo(node->own_name, node->own_priority) != 0) {
-        return -1;
-    }
     return 0;
 }
 
@@ -1127,6 +1124,20 @@ int main(int argc, char **argv)
         int64_t now_ns;
         int full;
 
+        /*
+         * Wait for the next message at URGENT priority, as the source
+         * timer thread does (D-068). Each message used to end with a drop
+         * to the own priority (10); from there the thread stayed READY
+         * behind the flood work at 12 on CPU 0 before it reached
+         * MsgReceive (41 of 45 pidin snapshots of relay A under the S2
+         * flood), and an URGENT sent to it waited up to 21 ms (D-073).
+         * Now a message is handled at its sender's priority and the thread
+         * comes back here; only lost lines drop to the own priority first.
+         * Blocked here it uses no CPU.
+         */
+        if (set_fifo(node.own_name, SIGNAL_PRIO_URGENT) != 0) {
+            return EXIT_FAILURE;
+        }
         memset(&buffer, 0, sizeof buffer);
         memset(&info, 0, sizeof info);
         rcvid = MsgReceive(attach->chid, &buffer, sizeof buffer, &info);
@@ -1189,9 +1200,6 @@ int main(int argc, char **argv)
                        "rejecting a system message failed") != 0) {
                 return EXIT_FAILURE;
             }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
-            }
             continue;
         }
 
@@ -1204,9 +1212,6 @@ int main(int argc, char **argv)
                            "rejecting the manifest failed") != 0) {
                     return EXIT_FAILURE;
                 }
-                if (set_fifo(node.own_name, node.own_priority) != 0) {
-                    return EXIT_FAILURE;
-                }
                 continue;
             }
             pthread_mutex_lock(&node.lock);
@@ -1214,9 +1219,6 @@ int main(int argc, char **argv)
                 pthread_mutex_unlock(&node.lock);
                 if (reject(node.own_name, rcvid, EBUSY,
                            "rejecting a second manifest failed") != 0) {
-                    return EXIT_FAILURE;
-                }
-                if (set_fifo(node.own_name, node.own_priority) != 0) {
                     return EXIT_FAILURE;
                 }
                 continue;
@@ -1227,9 +1229,6 @@ int main(int argc, char **argv)
             node.manifest_waiting = 1;
             wake_forward_locked(&node);
             pthread_mutex_unlock(&node.lock);
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
-            }
             continue;
         }
 
@@ -1258,9 +1257,6 @@ int main(int argc, char **argv)
                     pthread_cond_signal(&node.close_ready);
                     pthread_mutex_unlock(&node.lock);
                 }
-            }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
             }
             continue;
         }
@@ -1293,9 +1289,6 @@ int main(int argc, char **argv)
                            "rejecting the batch failed") != 0) {
                     return EXIT_FAILURE;
                 }
-                if (set_fifo(node.own_name, node.own_priority) != 0) {
-                    return EXIT_FAILURE;
-                }
                 continue;
             }
             if (admit_batch(&node, &buffer.batch, rcvid) != 0) {
@@ -1315,9 +1308,6 @@ int main(int argc, char **argv)
                        "rejecting that message failed") != 0) {
                 return EXIT_FAILURE;
             }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
-            }
             continue;
         }
 
@@ -1327,9 +1317,6 @@ int main(int argc, char **argv)
                     buffer.message.body.class_id);
             if (reject(node.own_name, rcvid, EINVAL,
                        "rejecting an unknown class failed") != 0) {
-                return EXIT_FAILURE;
-            }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }
             continue;
@@ -1342,9 +1329,6 @@ int main(int argc, char **argv)
                     buffer.message.body.hop_count);
             if (reject(node.own_name, rcvid, EMSGSIZE,
                        "rejecting a signal with no room for a hop stamp failed") != 0) {
-                return EXIT_FAILURE;
-            }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }
             continue;
@@ -1379,9 +1363,6 @@ int main(int argc, char **argv)
                         node.own_name, strerror(errno));
                 return EXIT_FAILURE;
             }
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
-            }
             note_drop(&node, buffer.message.body.number,
                       buffer.message.body.class_id);
             continue;
@@ -1408,9 +1389,6 @@ int main(int argc, char **argv)
                             node.own_name, strerror(errno));
                     return EXIT_FAILURE;
                 }
-                if (set_fifo(node.own_name, node.own_priority) != 0) {
-                    return EXIT_FAILURE;
-                }
                 note_drop(&node, buffer.message.body.number,
                           buffer.message.body.class_id);
                 continue;
@@ -1427,9 +1405,6 @@ int main(int argc, char **argv)
                         node.own_name, buffer.message.body.number);
                 if (reject(node.own_name, rcvid, EAGAIN,
                            "rejecting a signal because the queue is full failed") != 0) {
-                    return EXIT_FAILURE;
-                }
-                if (set_fifo(node.own_name, node.own_priority) != 0) {
                     return EXIT_FAILURE;
                 }
                 continue;
@@ -1454,8 +1429,8 @@ int main(int argc, char **argv)
         stamped.hop_count++;
 
         /* Reply first, so the forward thread cannot preempt this receive
-         * before the sender is released (D-031, D-035). Queue the signal
-         * before dropping to the node priority (D-050).
+         * before the sender is released (D-031, D-035). The signal is
+         * queued at the sender's priority (D-050, D-073).
          */
         if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
             fprintf(stderr, "relay %s: replying to the sender failed: %s\n",
@@ -1465,10 +1440,16 @@ int main(int argc, char **argv)
         {
             int queued = enqueue(&node, &stamped, now_ns);
 
-            if (set_fifo(node.own_name, node.own_priority) != 0) {
-                return EXIT_FAILURE;
-            }
+            /*
+             * No drop to the own priority here: the loop top raises the
+             * thread to URGENT before MsgReceive, and a drop to 10 in
+             * between left it READY behind the flood (D-073). Lost lines
+             * are printed at the own priority, as before.
+             */
             if (queued > 0) {
+                if (set_fifo(node.own_name, node.own_priority) != 0) {
+                    return EXIT_FAILURE;
+                }
                 write_lost(&node, &stamped);
                 continue;
             }

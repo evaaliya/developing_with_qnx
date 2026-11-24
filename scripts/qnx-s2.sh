@@ -68,6 +68,24 @@ if ! grep 'sink: state NORMAL' /tmp/sink.out >/dev/null 2>&1; then
     fail "sink did not reach NORMAL"
 fi
 
+# Receive threads wait for the next message at URGENT priority (D-068,
+# D-073). A thread that waits at 10 stays READY behind the flood work at
+# 12 before it reaches MsgReceive, and an URGENT sent to it waits too.
+k=0
+low=""
+while [ "$k" -lt 5 ]; do
+    low="$low$(pidin | awk -v a="$relay_a" -v b="$relay_b" -v s="$source_pid" \
+        '($1 == a || $1 == b || $1 == s) && $2 == 1 && $4 ~ /^10/ {
+            who = ($1 == a) ? "relay A" : ($1 == b) ? "relay B" : "source"
+            printf " %s %s %s;", who, $4, $5 }')"
+    k=$((k + 1))
+    sleep 0.1
+done
+if [ -n "$low" ]; then
+    fail "a receive thread rests at priority 10:$low"
+fi
+echo "s2: receive threads of source and both relays rest above priority 10 (5 snapshots)"
+
 echo "s2: flood on"
 echo 'flood on' > /dev/signal-source
 echo "s2: window start $(date +%s.%N)"
