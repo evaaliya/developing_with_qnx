@@ -2055,3 +2055,72 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-24 22:31 – 2026-11-25 00:20 +06 · every late signal held against the stall probe
+
+What changed (decisions D-064 to D-067):
+
+- Every guest check now runs `stall-probe` beside the network and one shared script, `scripts/qnx-late-check.sh`. Each late URGENT or COMMAND gets its own line: inside a fault the check caused on purpose (SIGSTOP or a kill), inside a guest stall the probe saw (with how much stall time fell on its way), or `FAIL … NOT inside a guest stall or a fault of this check`. A late signal outside both fails the check; a check without probe output fails too. The sink prints `sink: late signal N class C at T ms, total X ns` on `CLOCK_MONOTONIC`, the clock of the probe.
+- The scenario report has a `late` row per scenario. R1, R2 share, and R10 count an URGENT that was late inside a guest stall as not breaking them; the thresholds did not change (R1 share 1 and n ≥ 100, S2 median ≤ 2× S1, p99 and max ≤ 31 ms for signals outside stalls, R5 ≤ 31).
+- A restarted live source takes back the dead source's mode (normal, flood, mute) from its book, or prints why it cannot.
+- The counted runs (`run`, `run-flood`, `measure`) start sink, relay B, relay A, and source one after another, each after the name of the one before it exists, as the supervisor does.
+
+One build for every result in the tables below:
+
+```text
+a8fd2ed1b58b1279b7baef8565d8e1b5d2a03fad  source
+ec3e746a5f412d43cf1afd1f1e6997f3ea0f27d2  sink
+0fa74595630fa136a32b9d129bbb3f41db957067  relay
+997bb3c90ddeb4d0b407edec15135ca2cf77b650  supervisor
+c4aca02b8f247513eea57ae44fbdcca07c7f6976  telemetry
+0c1afdf45b3ed86a8dec2395e8baf225e597d435  stall-probe
+```
+
+### Five in a row
+
+`make scenarios`, first series (23:17–23:22): exit 0, 0, 2, 0, 2.
+
+- Run 3: S2 issued only 51 URGENT in its 5 s window (192–219 in every other run), so R2 had n < 100. None was late. The logs of that run were overwritten by the next one; the cause is not known.
+- Run 5: URGENT 3948 in S2 took 31.6 ms, 0.6 ms over the deadline, and no stall over 5 ms was on its way: `S2 late-check: FAIL late URGENT 3948 NOT inside a guest stall`. 29.1 ms of it was source to relay A. Relay A spent 42.8 ms sending BACKGROUND 3741 to relay B at the same time, while the probe on the same CPU at priority 31 woke on time: the CPU was free and both relays were blocked. Six S2 runs with node logs on disk against six with logs in RAM (`/dev/shmem`) gave URGENT source-to-relay-A maxima of 7.4–14.6 ms against 6.2–9.9 ms; neither reproduced 29 ms. Not explained.
+
+Second series (23:39–23:44), every run's logs kept: exit 0 five times, `scenarios failed 0` each time. S2 URGENT n 215, 217, 219, 217, 192; p99 7.9–9.9 ms; max 8.4–14.2 ms. In each run the only late signals were the ones the stopped relay B held in S3 (6 URGENT, 5 COMMAND), each `inside the fault stop-relay-b of this check`.
+
+`make run-long-flood` (60 s flood): the first series passed 1–3 before the session was cut; five in a row (23:45–23:51) exit 0 each, `late URGENT or COMMAND … outside 0` each, 2358–2392 URGENT issued and the same on the sink totals. Earlier series: 5 late signals, all inside guest stalls; one of them (URGENT 1724, 29.0 ms over the deadline) had only 23.7 ms of stall on its way.
+
+### Commands and results (one build, 23:51 – 00:13)
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 1028 PASS, 0 FAIL |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-source`, `run-dev`, `run-telemetry`, `panel-check` | 0 each | `unaccounted 0`; late URGENT or COMMAND 0 |
+| `make run-stop` | 0 | 11 late, each inside the fault `stop-relay-b` |
+| `make run-flood-hang` | 2 | `source neither exited nor gave up on the manifest within 45 s`; below |
+| `make measure` (N=34) | 0 | R5 0; URGENT median calm 1014496 ns, flood 1012000 ns (p99 3374992 ns); late in 68 runs: 0 |
+| `make run-long-live` (600 s) | 0 | 171286 signals, `unaccounted 0`, issued equals the sink totals; 4 late URGENT, each inside a guest stall that covers its lateness; 282 stalls over 5 ms, worst 72.8 ms |
+| `make run-live-restart` (300 s, four kills) | 0 | each node restarted once, `unaccounted 0`, issued equals the sink totals (URGENT 11029, COMMAND 368, BACKGROUND 203697); `source: restored the mode of the dead source: flood`, `/dev/signal-source` `mode flood`; 2 late URGENT, inside guest stalls |
+
+`run-flood-hang` failed once: within 45 s of relay A being stopped, source printed no `timed out` line, and its close got `Resource temporarily unavailable` instead of `Connection timed out`. Six more runs of both variants with the same build passed; source gave up 25–32 s after the stop. Likely the race of F-028: if relay A took the URGENT just before SIGSTOP, the sending thread waits for a reply and the send time limit does not free it. Not proven: no `pidin` was taken while it hung.
+
+### URGENT under flood: B22 against B23
+
+The B23 report gave a median of 1003992 ns against 835000 ns in B22. The B22 (`774e710`) and B23 (`4568320`) binaries were measured on the same guest in the same session, 34 flood runs per block, blocks interleaved:
+
+| Build | URGENT median, ns | runs with relay B → sink ≈ 30–36 ms |
+|---|---|---|
+| B22 | 999504, 995504, 1018000, 1011992, 1004496, 990000, 995504 | 0 of 238 |
+| B23 | 998000, 1050504, 1046496 | 2, 3, 4 of 34 |
+| current, start order not fixed | 1068000, 1023496 | 4, 4 of 34 |
+
+The B22 code gives the same ~1.0 ms today: the rise between the two reports was the guest, not the code. What B23 did change: in a few runs the burst reached relay B before the sink had its name, and every signal of the run waited about 30 ms there (p99 36 ms; these late URGENT were never checked by `make measure`). With the start order fixed: 0 such runs of 170 with the probe and 0 of 102 without. Over 306 URGENT each: B22 995504 ns (hops 128000 / 564000 / 283504), current without the probe 1035000 ns (132000 / 588000 / 296000), with the probe 1058000 ns. The remaining ~40 µs has no single cause found.
+
+### F-032: the guest kernel stop
+
+The kernel symbol file of the image (`procnto-smp-instr.sym`) places the instruction of the crash dump (`ffffff80600abad8`) in `clock_ist`, the kernel's clock interrupt thread. `nto_time@337` is the name and line of the check, not a function. The check reads `cntvct_el0`, converts it with `__cps` (62500000), and stops the kernel when the value is below the last one recorded. From the dumped registers the counter was 7488938 cycles (119.8 ms) behind on 2026-11-22 and 3624875 cycles (58.0 ms) behind on 2026-11-24. The 2026-11-22 crash has the same address and was taken before any shared memory code existed (`shm_open` first appears 2026-11-24 19:55), with `io-sock` as the active address space; on 2026-11-24 it was `devb-virtio`. The books in shared memory are therefore not needed for this crash.
+
+10× `run-dev` and 10× `run-live-restart` (60 s, each node in turn) in a row, 23:00–23:13: no kernel stop, the serial log stayed at its 417 boot bytes, the guest answered after every run. After each clean run `/dev/shmem` held only the two relay books (98328 bytes each).
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
