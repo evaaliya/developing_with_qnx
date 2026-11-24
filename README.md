@@ -18,7 +18,7 @@ This project floods the network, kills its nodes, and measures what happens to t
 | | |
 |---|---|
 | QNX | QNX Software Development Platform 8.0 (`uname -a`: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`) |
-| Target | QEMU `virt`, Cortex-A57, aarch64le, 2 CPUs, 1 GB, software emulation (TCG) on a Mac |
+| Target | QEMU `virt`, Cortex-A57, aarch64le, 2 CPUs (`-smp 2`), 1 GB, software emulation (TCG) on a Mac. The network nodes are pinned to CPU 0; with `-smp 1` the flood takes the only CPU and the guest stops answering |
 | Toolchain | `ntoaarch64-gcc` (GCC 12.2.0) from the SDP, run inside a Docker container (`docker-mac/`) |
 | Host tools | `make`, `cc`, Ruby (panel and reports), Python 3 (telemetry check) |
 
@@ -94,7 +94,7 @@ In the live network the source closes issued numbers while it runs, so a run has
 | `make run-live-restart` | 5 minutes under the supervisor; relay A, relay B, sink, and source each killed once |
 | `make panel-check` | Presses the panel buttons against the live network |
 
-Other targets (`run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `run-flood-hang`, `run-long-flood`) each check one fault or load case. Every target prints `PASS` or `FAIL` and exits non-zero on failure.
+Other targets (`run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `run-flood-hang`, `run-hold-urgent`, `run-long-flood`) each check one fault or load case. `scripts/series.sh N TARGET` runs a target N times and keeps every run's log under `build/series/`. Every target prints `PASS` or `FAIL` and exits non-zero on failure.
 
 ### The live network with the panel
 
@@ -128,18 +128,19 @@ Use the buttons, or write a command on the guest: `echo 'flood on' > /dev/signal
 
 ## Results
 
-From one build on 2026-11-24 (full output in [QNX_EVIDENCE.md](QNX_EVIDENCE.md)):
+From one build on 2026-11-25 (full output in [QNX_EVIDENCE.md](QNX_EVIDENCE.md)):
 
-- **Five minutes, four kills under flood** (`make run-live-restart`): every node restarted once, `unaccounted 0`; issued equals the sink's totals per class: URGENT 10952, COMMAND 368, BACKGROUND 167409.
-- **Ten minutes of the live network** (`make run-long-live`): 169288 signals, `unaccounted 0`.
-- **Scenarios:** S2 URGENT on time under flood 216/216, 3698 BACKGROUND dropped and counted, no URGENT or COMMAND dropped.
-- **Latency** (`make measure`, 34 runs each): URGENT median 1.09 ms calm, 1.00 ms under flood.
-- `make test`: 962 checks pass.
+- **Five minutes, four kills under flood** (`make run-live-restart`): every node restarted once, `unaccounted 0`; issued URGENT 11065, COMMAND 368, BACKGROUND 203482, all accounted.
+- **Ten minutes of the live network** (`make run-long-live`): 173911 signals, `unaccounted 0`, no late URGENT.
+- **Scenarios** (`make scenarios`, five times in a row, all pass): S2 issues 214–224 URGENT in its 5 s flood window, all on time, slowest 7.4 ms against a 31 ms deadline.
+- **Latency** (`make measure`, 34 runs each): URGENT median 1.03 ms calm, 1.05 ms under flood.
+- `make test`: 1143 checks pass.
 
 ## Known limitations
 
-- The guest runs under software emulation. A priority-31 probe runs beside every guest check and shows the whole guest stopping for 5–33 ms at times. A late URGENT or COMMAND inside such a stop is printed and does not fail the check; one outside it fails the check. `make scenarios` still fails now and then on a late URGENT outside any stop, and the cause is not found yet.
-- The guest kernel has stopped twice on its own clock check (in `clock_ist`, the clock interrupt thread) under emulation. It did not happen in 20 runs in a row afterwards.
+- The guest runs under software emulation and stops as a whole at times: over 300 s idle the stall probe saw 1126 stops over 5 ms, the worst 78 ms. A late URGENT or COMMAND is excused only when the stops on its way can cover how late it was; any other late signal fails the check.
+- The guest kernel has stopped three times on its own clock check (in `clock_ist`, the clock interrupt thread) under emulation, the last time on 2026-11-25. The cause is not known.
+- If the next node takes a signal and then never answers (stopped, not dead), the sending thread of source cannot be freed by its time limit. source still ends its run and gives up on the manifest; the process finishes exiting when that node dies.
 - Both ends of the network are simulated.
 
 ## Repository layout
