@@ -2124,3 +2124,109 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-25 01:04 – 04:05 +06 · URGENT starved by its own threads, a stuck send, and a stricter stall rule
+
+What changed (decisions D-068 to D-071):
+
+- **The source timer thread waits for its tick at URGENT priority.** It dropped to priority 10 before `MsgReceive`. A pulse raises only a thread already blocked in `MsgReceive`; under the S2 flood the thread stayed READY behind priority-12 work on CPU 0. `pidin -p source` during a failing S2 run showed it `10f READY` in 15 snapshots in a row while no URGENT was issued for 2.8 s.
+- **Relay drop lines and drop notices go out on a separate notice thread.** The single receive thread of relay A printed one flushed line per dropped signal after each flood batch and then waited for relay B to take a drop notice; an URGENT from source waited in SEND all that time. In 17 of 18 URGENT with a source → relay A hop over 10 ms, relay A was printing drop lines until 0.3–1.3 ms before the URGENT arrived.
+- **A late signal is excused by a guest stall only if the stall can cover how late it was.** The stall the probe saw is widened by one probe period (10 ms) before it, because the guest may have stopped any time after the probe's previous wake-up. Before, a stall that merely touched the signal's way excused it; 10 of 61 excused signals in all kept logs had less stall on their way than lateness, two of them in this batch's S2 runs before the relay fix.
+- **source ends its run when the timer thread is stuck in a send.** `issue_live` held the issue lock through the URGENT send; when the next node took the URGENT and never answered, the flood and close threads waited on that lock and no send time limit ever fired. `make run-hold-urgent` (new, with the test program `hold-next`, which takes one URGENT and stops) reproduces it every time on the old code. The lock is now released before the send, and a watch thread ends the run when the timer thread has waited longer than the send limit.
+- Every run of a check series keeps its logs: `build/scenarios/runs/<time>/`, `build/measure/runs/<time>/`, and `scripts/series.sh N TARGET` for any target.
+
+One build for every result in the tables below:
+
+```text
+b0b9e08e363cd91e716581cbfb2a6e93419bb9e2  source
+ec3e746a5f412d43cf1afd1f1e6997f3ea0f27d2  sink
+4f494b628505c51cceed76bd749f3bcd6098ab99  relay
+997bb3c90ddeb4d0b407edec15135ca2cf77b650  supervisor
+c4aca02b8f247513eea57ae44fbdcca07c7f6976  telemetry
+0c1afdf45b3ed86a8dec2395e8baf225e597d435  stall-probe
+c902098679634313872a786e7a6d30d8f82d52a9  hold-next (test program)
+```
+
+### S2: URGENT issued in the 5 s flood window
+
+`scripts/s2-series.sh` runs S2 alone and keeps each log.
+
+| Build | S2 runs | URGENT n per run | Runs with n below 100 | Largest source → relay A hop |
+|---|---|---|---|---|
+| before the fixes | 15 | 57, 75, 212–220 | 2 | 6.5–15.7 ms |
+| timer thread at URGENT priority | 10 | 213–220 | 0 | 7.2–9.9 ms, one run 56.2 ms |
+| and relay notice thread | 10 | 213–219 | 0 | 0.5–5.4 ms |
+
+In a failing run before the fix, no URGENT reached relay A for 3507.7 ms, until the flood was switched off. `pidin -p source` taken every ~0.35 s during another failing run:
+
+```text
+     pid tid name                         prio STATE          Blocked
+445939738   1 tmp/source                    10f READY
+```
+
+(15 snapshots in a row; thread 1 is the timer thread.)
+
+### A send that is never answered (F-033)
+
+`make run-hold-urgent` starts `hold-next` as relay A: it takes the first URGENT and then neither replies nor receives. On the code before the fix, `pidin` 10 s after the hold:
+
+```text
+38350870   1 tmp/source                    30f REPLY          38338581
+38350870   2 tmp/source                    20f RECEIVE        1
+38350870   3 tmp/source                    10r MUTEX          (0x25cb914010) 38350870-01 #
+38350870   4 tmp/source                    12f MUTEX          (0x25cb914010) 38350870-01 #
+```
+
+The timer thread waits for the reply; the flood and close threads wait for the lock the timer thread holds, so no send time limit fires and source never gives up (`FAIL source neither exited nor gave up on the manifest within 45 s`). After the fix:
+
+```text
+source: the next node did not take a BACKGROUND batch within 5 s; the flood thread stops
+source: a signal sent 6043 ms ago has no reply: signal-relay-a took it and does not answer, and the send time limit of 5 s cannot free it; the timer thread is stuck, the run ends without it
+source: sending the manifest failed: Connection timed out
+hold-urgent: source gave up 26 s after the hold
+hold-urgent: source exit 1 after the next node died
+hold-urgent: PASS
+```
+
+The thread waiting for the reply still cannot be freed by its time limit (a `name_attach` channel only gets an unblock pulse); the process finishes exiting when the next node dies. Stopping relay A at random with SIGSTOP did not hit this window in this batch: 26 series of `run-flood-hang` and 20 runs with the earlier relay passed.
+
+### Guest set-up: `-smp 2` against `-smp 1`
+
+Same build, same QEMU command except `-smp`. `scripts/stall-count.sh 300` runs the stall probe on an idle guest for 300 s:
+
+| | stalls over 5 ms | over 10 ms | over 20 ms | over 50 ms | worst | stall time |
+|---|---|---|---|---|---|---|
+| `-smp 2` | 1126 | 28 | 9 | 1 | 78.4 ms | 6859 ms |
+| `-smp 1` | 309 | 15 | 5 | 1 | 62.3 ms | 2037 ms |
+
+With `-smp 1` the guest stopped answering during the S2 flood and did not recover in 23 minutes; QEMU used one host core at 100 % and the serial log shows no crash. The network nodes run at SCHED_FIFO 12–30 and take the only CPU, so the scenario script, sshd, and the network stack never run again and the flood is never switched off. The guest stays on `-smp 2` (D-072). One CPU removes about 70 % of the stalls but not the long ones.
+
+The guest kernel stopped once more on `-smp 2` in this batch, during `run-flood-hang` with relay A stopped: same instruction `ffffff80600abad8`, same check `nto_time@337` in `clock_ist`, the counter 3448164 cycles (55.2 ms) behind the time already recorded.
+
+### Late signals and the stricter stall rule
+
+All late URGENT that were not inside a fault of their check, over every log of this batch: 8, all from builds before the relay fix; the largest hop was relay A → relay B for 5, source → relay A for 2, relay B → sink for 1. After the fix: none in 10 S2 runs, 5 scenario series, `make measure`, `run-long-live`, and `run-long-flood`.
+
+Under the rule of D-070, in the final runs 4 late URGENT were excused by guest stalls (1 in `run-dev`, 3 in `run-live-restart`); the stall time the probe saw covers the lateness for 3, and URGENT 113 (123.1 ms over the deadline, 119.7 ms seen) is covered only with the probe period (at most 153.7 ms).
+
+### Commands and results (one build, guest `-smp 2`, 02:16 – 04:00)
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 1143 PASS, 0 FAIL |
+| `make scenarios` ×5 | 0 each | `scenarios failed 0` each; S2 URGENT n 224, 215, 217, 216, 214; median 1153000–1340000 ns; max 2118000–7398992 ns; late only the 6 URGENT the stopped relay B held in S3 |
+| `make measure` (N=34) | 0 | R5 0; URGENT median calm 1025504 ns (p99 3350000), flood 1049496 ns (p99 3262000); late in 68 runs: 0 |
+| `make run-long-live` (600 s) | 0 | 173911 signals, `unaccounted 0`, issued equals the sink totals (URGENT 22940, COMMAND 745, BACKGROUND 150226); late URGENT 0; 165 stalls over 5 ms, worst 19.2 ms |
+| `make run-live-restart` (300 s, four kills) | 0 | issued URGENT 11065, COMMAND 368, BACKGROUND 203482, `unaccounted 0`; 3 late URGENT, each covered by guest stalls |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-source`, `run-telemetry`, `panel-check` | 0 each | `unaccounted 0`; late 0 |
+| `make run-stop` | 0 | 11 late, each inside the fault `stop-relay-b` |
+| `make run-dev` | 0 | 1 late URGENT, covered by a guest stall |
+| `make run-hold-urgent` | 0 | above |
+| `make run-flood-hang` ×30 | 0 each | 30 of 30 passed; over the 60 variant runs (urgent and mute) source gave up 25 s (20) or 26 s (40) after the stop; in every one the flood thread was the one stuck |
+| `make run-long-flood` ×5 | 0 each | late URGENT or COMMAND 0 in each |
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
