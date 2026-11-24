@@ -54,9 +54,14 @@ static void ctl_unlock(void)
 }
 
 static int telemetry_on;
+/* Telemetry reads these; the live book sets them (D-063). */
+static unsigned g_books_resumes;
+static int g_books_reset;
+static unsigned live_waiting(void);
 
 static void publish_source(int flush)
 {
+    struct telem_books books;
     char buf[TELEM_REPORT_CAP];
     enum telem_mode mode;
     uint64_t urgent;
@@ -73,7 +78,12 @@ static void publish_source(int flush)
     command = g_ctl.issued_command;
     background = g_ctl.issued_background;
     ctl_unlock();
-    n = telem_report_source(buf, sizeof buf, mode, urgent, command, background);
+    memset(&books, 0, sizeof books);
+    books.source_resumes = g_books_resumes;
+    books.source_reset = (uint32_t)g_books_reset;
+    books.waiting = live_waiting();
+    n = telem_report_source(buf, sizeof buf, mode, urgent, command, background,
+                            &books);
     if (n < 0) {
         return;
     }
@@ -592,8 +602,18 @@ struct live_state {
 };
 
 static struct live_state g_live;
-static unsigned g_books_resumes;
-static int g_books_reset;
+
+/* Numbers that wait to be closed, for telemetry. A read without the lock
+   may be one behind; the next report has the next value. */
+static unsigned live_waiting(void)
+{
+    struct live_book *book = g_live.book;
+
+    if (book == NULL) {
+        return 0;
+    }
+    return __atomic_load_n(&book->ring.count, __ATOMIC_RELAXED);
+}
 
 static int link_gone(int err)
 {

@@ -125,9 +125,15 @@ static void test_roundtrip(void)
         "median_ns none max_ns none\n"
         "class BACKGROUND issued 9 on_time 6 late 0 lost 0 dropped 3 "
         "median_ns 8 max_ns 8\n"
+        "books source_resumes 1 source_reset 0 waiting 812 sink_resumes 2 "
+        "sink_reset 1\n"
         "end\n";
 
     telem_snapshot_init(&snap);
+    snap.books.source_resumes = 1;
+    snap.books.waiting = 812;
+    snap.books.sink_resumes = 2;
+    snap.books.sink_reset = 1;
     snap.seq = 7;
     snap.time_ns = 99;
     snap.state = NET_DEGRADED;
@@ -168,6 +174,19 @@ static void test_roundtrip(void)
     expect_i64("parsed urgent median", back.klass[0].median_ns, 15);
     expect_int("command has no latency", back.klass[1].have_latency, 0);
     expect_u32("parsed background dropped", back.klass[2].dropped, 3);
+    expect_u64("parsed numbers waiting to be closed", back.books.waiting, 812);
+    expect_u32("parsed sink resumes", back.books.sink_resumes, 2);
+    expect_u32("parsed sink reset", back.books.sink_reset, 1);
+    expect_u32("parsed source resumes", back.books.source_resumes, 1);
+    {
+        char nobooks[TELEM_REPORT_CAP];
+        const char *cut = strstr(want, "books ");
+
+        snprintf(nobooks, sizeof nobooks, "%.*s", (int)(cut - want), want);
+        strncat(nobooks, "end\n", sizeof nobooks - strlen(nobooks) - 1);
+        expect_int("a snapshot without books is refused",
+                   telem_snapshot_parse(nobooks, &back), -1);
+    }
 
     kept = back.klass[0];
     expect_int("a short buffer is refused",
@@ -206,6 +225,7 @@ static void test_merge(void)
     char sink[TELEM_REPORT_CAP];
     char nodes[TELEM_REPORT_CAP];
     char again[TELEM_REPORT_CAP];
+    struct telem_books books;
     int n;
 
     memset(klass, 0, sizeof klass);
@@ -218,7 +238,12 @@ static void test_merge(void)
     klass[1].late = 1;
 
     telem_snapshot_init(&snap);
-    n = telem_report_source(source, sizeof source, TELEM_MODE_FLOOD, 3, 1, 8);
+    memset(&books, 0, sizeof books);
+    books.source_resumes = 1;
+    books.waiting = 1563;
+    books.sink_resumes = 9;
+    n = telem_report_source(source, sizeof source, TELEM_MODE_FLOOD, 3, 1, 8,
+                            &books);
     expect_int("source report fits", n > 0, 1);
     expect_int("flood wins over mute",
                (int)telem_mode_from_flags(1, 0), (int)TELEM_MODE_FLOOD);
@@ -232,8 +257,14 @@ static void test_merge(void)
     expect_int("state stays INIT until sink speaks", (int)snap.state,
                (int)NET_INIT);
     expect_int("nodes stay unknown", snap.node[TELEM_SINK].alive, -1);
+    expect_u32("source resumes came from source", snap.books.source_resumes, 1);
+    expect_u64("waiting came from source", snap.books.waiting, 1563);
+    expect_u32("source does not set sink resumes", snap.books.sink_resumes, 0);
 
-    n = telem_report_sink(sink, sizeof sink, NET_DEGRADED, klass);
+    memset(&books, 0, sizeof books);
+    books.sink_resumes = 1;
+    books.sink_reset = 1;
+    n = telem_report_sink(sink, sizeof sink, NET_DEGRADED, klass, &books);
     expect_int("sink report fits", n > 0, 1);
     expect_int("merge sink report", telem_snapshot_merge_report(&snap, sink),
                0);
@@ -244,6 +275,30 @@ static void test_merge(void)
     expect_int("mode survived the sink report", (int)snap.source_mode,
                (int)TELEM_MODE_FLOOD);
     expect_u64("issued survived the sink report", snap.klass[0].issued, 3);
+    expect_u32("sink resumes came from sink", snap.books.sink_resumes, 1);
+    expect_u32("sink reset came from sink", snap.books.sink_reset, 1);
+    expect_u64("waiting survived the sink report", snap.books.waiting, 1563);
+    expect_int("a sink report without books is refused",
+               telem_snapshot_merge_report(
+                   &snap, "kind sink\nstate NORMAL\n"
+                          "class URGENT on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\n"
+                          "class COMMAND on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\n"
+                          "class BACKGROUND on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\nend\n"),
+               -1);
+    expect_int("a books line a sink cannot send is refused",
+               telem_snapshot_merge_report(
+                   &snap, "kind sink\nstate NORMAL\n"
+                          "class URGENT on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\n"
+                          "class COMMAND on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\n"
+                          "class BACKGROUND on_time 0 late 0 lost 0 dropped 0 "
+                          "median_ns none max_ns none\n"
+                          "books resumes 1 reset 0 waiting 4\nend\n"),
+               -1);
 
     memset(node, 0, sizeof node);
     node[TELEM_SOURCE].alive = 1;

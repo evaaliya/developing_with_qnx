@@ -49,6 +49,7 @@ static void publish_sink(const struct signal_ledger *ledger,
                          enum net_state state, int flush)
 {
     struct telem_class klass[3];
+    struct telem_books books;
     char buf[TELEM_REPORT_CAP];
     int i;
     int n;
@@ -71,7 +72,10 @@ static void publish_sink(const struct signal_ledger *ledger,
         klass[i].dropped = dropped;
         telem_class_set_latency(&klass[i], &hop_window[i]);
     }
-    n = telem_report_sink(buf, sizeof buf, state, klass);
+    memset(&books, 0, sizeof books);
+    books.sink_resumes = ledger->resumes;
+    books.sink_reset = (uint32_t)books_reset;
+    n = telem_report_sink(buf, sizeof buf, state, klass, &books);
     if (n < 0) {
         return;
     }

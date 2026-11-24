@@ -46,6 +46,19 @@ struct telem_class {
     int64_t max_ns;
 };
 
+/*
+ * Whether the books outlived restarts (D-063). source reports its own
+ * part and the numbers that wait to be closed, sink its own part. A
+ * reset is 1 when a restarted node found no books to go on from.
+ */
+struct telem_books {
+    uint32_t source_resumes;
+    uint32_t source_reset;
+    uint64_t waiting;
+    uint32_t sink_resumes;
+    uint32_t sink_reset;
+};
+
 /* alive is -1 until a nodes report, 0 dead, 1 alive. */
 struct telem_node {
     int alive;
@@ -59,6 +72,7 @@ struct telem_snapshot {
     enum telem_mode source_mode;
     struct telem_node node[TELEM_NODES];
     struct telem_class klass[3];
+    struct telem_books books;
 };
 
 struct telem_window {
@@ -88,9 +102,11 @@ const char *telem_mode_name(enum telem_mode mode);
  * an argument is NULL. */
 int telem_report_source(char *buf, size_t cap, enum telem_mode mode,
                         uint64_t issued_urgent, uint64_t issued_command,
-                        uint64_t issued_background);
+                        uint64_t issued_background,
+                        const struct telem_books *books);
 int telem_report_sink(char *buf, size_t cap, enum net_state state,
-                      const struct telem_class klass[3]);
+                      const struct telem_class klass[3],
+                      const struct telem_books *books);
 int telem_report_nodes(char *buf, size_t cap,
                        const struct telem_node node[TELEM_NODES]);
 

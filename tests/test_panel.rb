@@ -18,7 +18,7 @@ def check(name, ok, failures)
   failures
 end
 
-def snapshot(state, mode, issued, median)
+def snapshot(state, mode, issued, median, resumes = 1, sink_reset = 0)
   <<SNAP
 seq 4
 time_ns 1000
@@ -31,6 +31,7 @@ node sink alive 1 restarts 0
 class URGENT issued #{issued} on_time 3 late 1 lost 0 dropped 0 median_ns #{median} max_ns 2000
 class COMMAND issued 1 on_time 1 late 0 lost 0 dropped 0 median_ns none max_ns none
 class BACKGROUND issued 2 on_time 2 late 0 lost 0 dropped 0 median_ns 5 max_ns 9
+books source_resumes #{resumes} source_reset 0 waiting 812 sink_resumes 1 sink_reset #{sink_reset}
 end
 SNAP
 end
@@ -52,6 +53,39 @@ failures = check("parse rejects a snapshot with no end",
                  failures)
 failures = check("parse rejects an unknown state",
                  PanelView.parse(text.sub("state NORMAL", "state ASLEEP")).nil?,
+                 failures)
+failures = check("parse keeps the books",
+                 parsed && parsed["books"]["waiting"] == 812 &&
+                   parsed["books"]["source_resumes"] == 1 &&
+                   parsed["books"]["sink_reset"] == 0,
+                 failures)
+failures = check("parse rejects a snapshot with no books",
+                 PanelView.parse(text.sub(/^books .*\n/, "")).nil?,
+                 failures)
+failures = check("parse rejects books in the wrong order",
+                 PanelView.parse(text.sub("source_resumes 1 source_reset 0",
+                                          "source_reset 0 source_resumes 1")).nil?,
+                 failures)
+kept_model = PanelView::Model.new
+kept_model.push(text, 10.0)
+kept_view = kept_model.sample(10.0)[:view]
+failures = check("the page says the books were kept and what waits",
+                 PanelView.render_text(kept_view).include?(
+                   "books kept across restarts: source 1, sink 1; 812 issued numbers wait to be closed"),
+                 failures)
+failures = check("kept books show no reset warning",
+                 !PanelView.render_fragment(kept_view).include?("books-reset"),
+                 failures)
+reset_model = PanelView::Model.new
+reset_model.push(snapshot("SAFE", "normal", 7, 1000, 0, 1), 10.0)
+reset_view = reset_model.sample(10.0)[:view]
+failures = check("a reset is a red banner on the page",
+                 PanelView.render_fragment(reset_view).include?(
+                   "banner bad books-reset\">books reset after a restart of sink"),
+                 failures)
+failures = check("a reset is said in the text view",
+                 PanelView.render_text(reset_view).include?(
+                   "totals before that restart are not included"),
                  failures)
 failures = check("parse rejects one-sided latency",
                  PanelView.parse(text.sub("median_ns none max_ns none",

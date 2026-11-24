@@ -54,6 +54,7 @@ def parse_snapshot(text):
         "source_mode": None,
         "nodes": {},
         "classes": {},
+        "books": None,
         "raw": text,
     }
     for line in text.splitlines():
@@ -82,6 +83,10 @@ def parse_snapshot(text):
                 "dropped": int(parts[11]),
                 "median_ns": parts[13],
                 "max_ns": parts[15],
+            }
+        elif parts[0] == "books" and len(parts) == 11:
+            snap["books"] = {
+                parts[i]: int(parts[i + 1]) for i in range(1, 11, 2)
             }
         elif parts[0] != "end":
             return None

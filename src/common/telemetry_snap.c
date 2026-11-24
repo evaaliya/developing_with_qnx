@@ -240,13 +240,14 @@ static int append_class_full(char *buf, size_t cap, size_t *used,
 
 int telem_report_source(char *buf, size_t cap, enum telem_mode mode,
                         uint64_t issued_urgent, uint64_t issued_command,
-                        uint64_t issued_background)
+                        uint64_t issued_background,
+                        const struct telem_books *books)
 {
     size_t used = 0;
     uint64_t values[3];
     int i;
 
-    if (buf == NULL || cap == 0) {
+    if (buf == NULL || cap == 0 || books == NULL) {
         return -1;
     }
     values[0] = issued_urgent;
@@ -264,19 +265,24 @@ int telem_report_source(char *buf, size_t cap, enum telem_mode mode,
             return -1;
         }
     }
-    if (append_text(buf, cap, &used, "end\n") != 0) {
+    if (append_text(buf, cap, &used,
+                    "books resumes %u reset %u waiting %" PRIu64 "\n",
+                    books->source_resumes, books->source_reset,
+                    books->waiting) != 0 ||
+        append_text(buf, cap, &used, "end\n") != 0) {
         return -1;
     }
     return (int)used;
 }
 
 int telem_report_sink(char *buf, size_t cap, enum net_state state,
-                      const struct telem_class klass[3])
+                      const struct telem_class klass[3],
+                      const struct telem_books *books)
 {
     size_t used = 0;
     int i;
 
-    if (buf == NULL || cap == 0 || klass == NULL ||
+    if (buf == NULL || cap == 0 || klass == NULL || books == NULL ||
         net_state_name(state) == NULL) {
         return -1;
     }
@@ -301,7 +307,9 @@ int telem_report_sink(char *buf, size_t cap, enum net_state state,
             return -1;
         }
     }
-    if (append_text(buf, cap, &used, "end\n") != 0) {
+    if (append_text(buf, cap, &used, "books resumes %u reset %u\n",
+                    books->sink_resumes, books->sink_reset) != 0 ||
+        append_text(buf, cap, &used, "end\n") != 0) {
         return -1;
     }
     return (int)used;
@@ -358,6 +366,14 @@ int telem_snapshot_format(const struct telem_snapshot *snap, char *buf,
                               (uint32_t)(i + 1)) != 0) {
             return -1;
         }
+    }
+    if (append_text(buf, cap, &used,
+                    "books source_resumes %u source_reset %u waiting %" PRIu64
+                    " sink_resumes %u sink_reset %u\n",
+                    snap->books.source_resumes, snap->books.source_reset,
+                    snap->books.waiting, snap->books.sink_resumes,
+                    snap->books.sink_reset) != 0) {
+        return -1;
     }
     if (append_text(buf, cap, &used, "end\n") != 0) {
         return -1;
@@ -526,8 +542,59 @@ struct parse_flags {
     int class_full[3];
     int class_issued[3];
     int class_sink[3];
+    int books;
     int ended;
 };
+
+/*
+ * books, by kind: source "resumes R reset X waiting W", sink "resumes R
+ * reset X", full snapshot all five (D-063).
+ */
+static int take_books(struct telem_snapshot *snap, char **words, int n,
+                      struct parse_flags *flags)
+{
+    struct telem_books b = snap->books;
+
+    if (flags->books) {
+        return -1;
+    }
+    if (flags->kind == KIND_SOURCE) {
+        if (n != 7 || strcmp(words[1], "resumes") != 0 ||
+            strcmp(words[3], "reset") != 0 ||
+            strcmp(words[5], "waiting") != 0 ||
+            parse_u32(words[2], &b.source_resumes) != 0 ||
+            parse_u32(words[4], &b.source_reset) != 0 ||
+            parse_u64(words[6], &b.waiting) != 0) {
+            return -1;
+        }
+    } else if (flags->kind == KIND_SINK) {
+        if (n != 5 || strcmp(words[1], "resumes") != 0 ||
+            strcmp(words[3], "reset") != 0 ||
+            parse_u32(words[2], &b.sink_resumes) != 0 ||
+            parse_u32(words[4], &b.sink_reset) != 0) {
+            return -1;
+        }
+    } else if (flags->kind == KIND_FULL || flags->kind == KIND_NONE) {
+        if (n != 11 || strcmp(words[1], "source_resumes") != 0 ||
+            strcmp(words[3], "source_reset") != 0 ||
+            strcmp(words[5], "waiting") != 0 ||
+            strcmp(words[7], "sink_resumes") != 0 ||
+            strcmp(words[9], "sink_reset") != 0 ||
+            parse_u32(words[2], &b.source_resumes) != 0 ||
+            parse_u32(words[4], &b.source_reset) != 0 ||
+            parse_u64(words[6], &b.waiting) != 0 ||
+            parse_u32(words[8], &b.sink_resumes) != 0 ||
+            parse_u32(words[10], &b.sink_reset) != 0) {
+            return -1;
+        }
+        flags->kind = KIND_FULL;
+    } else {
+        return -1;
+    }
+    snap->books = b;
+    flags->books = 1;
+    return 0;
+}
 
 static int take_class_issued(struct telem_snapshot *snap, char **words, int n,
                              struct parse_flags *flags)
@@ -663,7 +730,8 @@ static int flags_complete(const struct parse_flags *flags)
         return 0;
     }
     if (flags->kind == KIND_FULL) {
-        if (!flags->seq || !flags->time_ns || !flags->state || !flags->mode) {
+        if (!flags->seq || !flags->time_ns || !flags->state || !flags->mode ||
+            !flags->books) {
             return 0;
         }
         for (i = 0; i < TELEM_NODES; i++) {
@@ -679,7 +747,7 @@ static int flags_complete(const struct parse_flags *flags)
         return 1;
     }
     if (flags->kind == KIND_SINK) {
-        if (!flags->state) {
+        if (!flags->state || !flags->books) {
             return 0;
         }
         for (i = 0; i < 3; i++) {
@@ -690,7 +758,7 @@ static int flags_complete(const struct parse_flags *flags)
         return 1;
     }
     if (flags->kind == KIND_SOURCE) {
-        if (!flags->mode) {
+        if (!flags->mode || !flags->books) {
             return 0;
         }
         for (i = 0; i < 3; i++) {
@@ -817,6 +885,9 @@ static int take_line(struct telem_snapshot *snap, char *line,
             flags->kind = KIND_FULL;
         }
         return take_node(snap, words, n, flags);
+    }
+    if (strcmp(words[0], "books") == 0) {
+        return take_books(snap, words, n, flags);
     }
     if (strcmp(words[0], "class") == 0) {
         if (flags->kind == KIND_SOURCE ||

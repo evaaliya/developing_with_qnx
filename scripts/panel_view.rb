@@ -42,7 +42,8 @@ module PanelView
       "state" => nil,
       "source_mode" => nil,
       "nodes" => {},
-      "classes" => {}
+      "classes" => {},
+      "books" => nil
     }
     ended = false
     text.each_line do |raw|
@@ -99,6 +100,14 @@ module PanelView
           "median_ns" => median,
           "max_ns" => maximum
         }
+      when "books"
+        # Books outlived restarts, or a restart reset them (D-063).
+        return nil unless parts.length == 11 && snap["books"].nil?
+        keys = %w[source_resumes source_reset waiting sink_resumes sink_reset]
+        return nil unless keys.each_with_index.all? { |k, i| parts[1 + 2 * i] == k }
+        values = keys.each_with_index.map { |_k, i| integer(parts[2 + 2 * i]) }
+        return nil if values.any? { |n| n.nil? || n < 0 }
+        snap["books"] = Hash[keys.zip(values)]
       when "end"
         return nil unless parts.length == 1
         return nil if ended
@@ -112,6 +121,7 @@ module PanelView
     return nil if snap["state"].nil? || snap["source_mode"].nil?
     return nil unless NODES.all? { |name| snap["nodes"].key?(name) }
     return nil unless CLASSES.all? { |name| snap["classes"].key?(name) }
+    return nil if snap["books"].nil?
     snap
   end
 
@@ -217,6 +227,7 @@ module PanelView
         :seq => @last["seq"],
         :nodes => nodes,
         :classes => @last["classes"],
+        :books => @last["books"],
         :telemetry => "serving"
       }
     end
@@ -247,6 +258,21 @@ module PanelView
     value.nil? ? "none" : "#{value} ns"
   end
 
+  # One line on the books, and a warning when a restart reset them.
+  def books_lines(books)
+    lines = []
+    reset = []
+    reset << "source" if books["source_reset"] > 0
+    reset << "sink" if books["sink_reset"] > 0
+    unless reset.empty?
+      lines << "books reset after a restart of #{reset.join(' and ')}: " \
+        "totals before that restart are not included"
+    end
+    lines << "books kept across restarts: source #{books['source_resumes']}, " \
+      "sink #{books['sink_resumes']}; #{books['waiting']} issued numbers wait to be closed"
+    lines
+  end
+
   def render_text(view)
     lines = []
     case view[:kind]
@@ -270,6 +296,7 @@ module PanelView
       lines << "state: #{view[:state]}"
       lines << "source mode: #{view[:mode]}"
       lines << "snapshot age: #{view[:age_seconds]} seconds"
+      lines.concat(books_lines(view[:books]))
       CLASSES.each do |name|
         row = view[:classes][name]
         lines << "class #{name} issued #{row['issued']} on time #{row['on_time']} " \
@@ -321,6 +348,11 @@ module PanelView
       end
       parts << "<div class=\"map\">#{cards.join('<span class="arrow">→</span>')}</div>"
       parts << "<p class=\"telemetry\">telemetry (serving), not on the signal path</p>"
+      books = books_lines(view[:books])
+      if books.length > 1
+        parts << "<p class=\"banner bad books-reset\">#{h(books[0])}</p>"
+      end
+      parts << "<p class=\"books\">#{h(books.last)}</p>"
       rows = CLASSES.map do |name|
         row = view[:classes][name]
         "<tr><th>#{h(name)}</th><td>#{row['issued']}</td><td>#{row['on_time']}</td>" \
