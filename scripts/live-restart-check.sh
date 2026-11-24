@@ -91,12 +91,18 @@ last=$(awk '/^=== / { if (cur != "" && cur ~ /\nmap: /) keep = cur; cur = $0; ne
 echo "--- last current panel sample ---"
 echo "$last"
 waiting=$(echo "$last" | sed -n 's/.*; \([0-9]*\) issued numbers wait to be closed/\1/p')
+# source publishes its issued count after MsgSend returns, and relay A
+# answers on receipt, so the sink may publish a signal as accounted
+# before source publishes it as issued. Each sending thread has at most
+# its last send unpublished: URGENT and COMMAND come from the schedule
+# thread (1), BACKGROUND also from one flood batch (72 + 1) (D-067).
 for c in URGENT COMMAND BACKGROUND; do
+    case "$c" in BACKGROUND) lead=73 ;; *) lead=1 ;; esac
     line=$(echo "$last" | grep "^class $c issued ")
     # class X issued I on time O late L lost S dropped D ...
     gap=$(echo "$line" | awk '{ print $4 - ($7 + $9 + $11 + $13) }')
-    echo "live-restart-check: panel $c issued minus accounted ${gap:-none}, waiting ${waiting:-none}"
-    [ -n "$gap" ] && [ -n "$waiting" ] && [ "$gap" -ge 0 ] && [ "$gap" -le "$waiting" ]
+    echo "live-restart-check: panel $c issued minus accounted ${gap:-none}, waiting ${waiting:-none}, accounted may lead by $lead"
+    [ -n "$gap" ] && [ -n "$waiting" ] && [ "$gap" -ge "-$lead" ] && [ "$gap" -le "$waiting" ]
     check $? "panel: every issued $c is accounted or waits to be closed"
 done
 
