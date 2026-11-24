@@ -30,7 +30,9 @@ int issued_ring_push(struct issued_ring *ring, uint64_t number,
     slot->class_id = class_id;
     slot->reserved = 0;
     slot->issued_ns = issued_ns;
-    ring->count++;
+    /* The commit: the ring may live in shared memory and outlive a
+       SIGKILL, so the item is whole before it is counted (D-063). */
+    __atomic_store_n(&ring->count, ring->count + 1, __ATOMIC_RELEASE);
     return 0;
 }
 

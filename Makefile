@@ -65,6 +65,11 @@ test: build/latency-report
 		tests/test_telemetry.c src/common/telemetry_snap.c \
 		src/common/latency_stats.c src/common/net_state.c \
 		src/common/signal_msg.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-books \
+		tests/test_books.c src/common/live_book.c src/common/close_list.c \
+		src/common/signal_ledger.c src/common/drop_book.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-node-store \
+		tests/test_node_store.c src/common/node_store.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
@@ -76,6 +81,8 @@ test: build/latency-report
 	./build/test-fault
 	./build/test-source-ctl
 	./build/test-telemetry
+	./build/test-books
+	./build/test-node-store
 	/usr/bin/ruby tests/test_panel.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
