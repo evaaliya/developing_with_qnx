@@ -52,15 +52,36 @@ run_check
 expect_status 0 "late inside a stall passes"
 expect_line "t: late URGENT 7 inside a guest stall of 40 ms at 5000 ms" "stall line names the signal"
 expect_line "t: late URGENT 1: inside guest stalls 1, inside faults 0, outside 0" "per-class count"
-expect_line "9.0 ms over the deadline, 30.0 ms of stalls on its way)" "stall time on the way"
-expect_line "t: late inside guest stalls whose stall time covers the lateness 1 of 1" "covered count"
+expect_line "9.0 ms over the deadline, 30.0 ms of stalls on its way, at most 40.0 ms)" "stall time on the way"
+expect_line "t: late inside guest stalls whose stall time seen covers the lateness 1 of 1" "covered count"
 
-# 2b. A long way that only grazes the stall: inside, but not covered.
+# 2b. A long way that only grazes the stall: the stall cannot explain
+# 49 ms of lateness even if it began a whole probe period before the
+# probe saw it (4990..5001, 11 ms), so the check fails (D-070).
 printf 'sink: late signal 8 class URGENT at 5001 ms, total 80000000 ns\n' > "$dir/sink.out"
 run_check
-expect_status 0 "a grazed stall still passes (D-062 overlap rule)"
-expect_line "49.0 ms over the deadline, 1.0 ms of stalls on its way, less than it was late)" "graze says less than late"
-expect_line "covers the lateness 0 of 1" "graze not covered"
+expect_status 1 "a grazed stall that does not cover the lateness fails (D-070)"
+expect_line "t: FAIL late URGENT 8 meets a guest stall of 40 ms at 5000 ms, but the stalls on its way (1.0 ms seen, at most 11.0 ms) do not cover how late it was (49.0 ms over the deadline; on its way 4921 ms to 5001 ms" "graze line"
+expect_line "t: late URGENT 1: inside guest stalls 0, inside faults 0, outside 1" "graze counted outside"
+
+# 2d. Covered only when the stall may have begun up to one probe period
+# before the late wake-up: the probe slept 10 ms, so a 10 ms late wake
+# can be a 20 ms stop. Way 4964..5010, 15 ms over, 10 ms seen, at most 20.
+printf 'stall-probe: start 1000 ms, period 10 ms, threshold 5 ms\nstall-probe: woke 10000000 ns late at 5000 ms\n' > "$dir/stall-probe.out"
+printf 'sink: late signal 12 class URGENT at 5010 ms, total 46000000 ns\n' > "$dir/sink.out"
+run_check
+expect_status 0 "covered with the probe period passes"
+expect_line "15.0 ms over the deadline, 10.0 ms of stalls on its way, at most 20.0 ms)" "seen and at most"
+
+# 2e. Two stalls on one way: the period before the second one overlaps
+# the first, and that time is counted once. Stalls 5000..5008 and
+# 5012..5020; at most 4990..5020 = 30 ms, not 38.
+printf 'stall-probe: start 1000 ms, period 10 ms, threshold 5 ms\nstall-probe: woke 8000000 ns late at 5000 ms\nstall-probe: woke 8000000 ns late at 5012 ms\n' > "$dir/stall-probe.out"
+printf 'sink: late signal 13 class URGENT at 5020 ms, total 80000000 ns\n' > "$dir/sink.out"
+run_check
+expect_status 1 "two stalls counted once each still short of 49 ms"
+expect_line "(16.0 ms seen, at most 30.0 ms)" "overlapping periods counted once"
+printf 'stall-probe: start 1000 ms, period 10 ms, threshold 5 ms\nstall-probe: woke 40000000 ns late at 5000 ms\n' > "$dir/stall-probe.out"
 
 # 2c. A fault of the check wins over a stall on the same way.
 printf 'begin stop-relay-b 4000\nend stop-relay-b 5010\n' > "$dir/late-faults.txt"

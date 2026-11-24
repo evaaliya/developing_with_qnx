@@ -11,12 +11,15 @@
 #
 # A late signal was on its way from (arrival - total) to arrival. It is
 # inside a fault when that window meets a fault the check caused on
-# purpose (SIGSTOP of a relay, a kill), and otherwise inside a guest
-# stall when it meets a stall the probe saw ([due, due + late]). Either
-# way it gets its own line; a stall line also says how much stall time
-# fell on its way and whether that covers how late it was. A late signal
-# inside neither is a failure of the check: exit 1. No probe output is
-# exit 2: then nothing can be told apart.
+# purpose (SIGSTOP of a relay, a kill). Otherwise it meets a guest stall
+# when its way meets a stall the probe saw ([due, due + late]); the
+# probe slept one period before that wake-up, so the stop may have begun
+# up to one period earlier ([due - period, due + late]). It is excused
+# only if that most stall time on its way covers how late it was
+# (D-070); its line gives the stall time seen and the most possible.
+# A late signal neither in a fault nor covered by stalls is a failure
+# of the check: exit 1. No probe output is exit 2: then nothing can be
+# told apart.
 #
 # The probe, the sink, and the fault marks all print CLOCK_MONOTONIC ms.
 set -u
@@ -87,7 +90,7 @@ check)
     fi
     [ -f "$FAULTS" ] || : > "$FAULTS"
     awk -v label="$label" -v probe="$PROBE_OUT" -v faults="$FAULTS" '
-        FILENAME == probe && $2 == "start" { p0 = $3; next }
+        FILENAME == probe && $2 == "start" { p0 = $3; period = $6 + 0; next }
         FILENAME == probe && $2 == "woke" {
             n++; s0[n] = $7; s1[n] = $7 + $3 / 1000000
             if ($3 > worst) worst = $3
@@ -115,20 +118,36 @@ check)
                 printf "%s: late %s %s inside the fault %s of this check (on its way %d ms to %d ms)\n", label, c, num, fname[hit], a, t
                 next
             }
-            stalled = 0
+            # stalled: stall time the probe saw on the way. most: the
+            # same with each stall widened by the probe period before it,
+            # time shared by two widened stalls counted once (D-070).
+            stalled = 0; most = 0; last = -1
+            if (period <= 0) period = 10
             if (a >= p0) {
-                for (i = 1; i <= n; i++) if (s0[i] <= t && s1[i] >= a) {
-                    if (!hit) hit = i
-                    lo = s0[i] > a ? s0[i] : a; hi = s1[i] < t ? s1[i] : t
-                    stalled += hi - lo
+                for (i = 1; i <= n; i++) {
+                    if (s0[i] <= t && s1[i] >= a) {
+                        if (!hit) hit = i
+                        lo = s0[i] > a ? s0[i] : a; hi = s1[i] < t ? s1[i] : t
+                        stalled += hi - lo
+                    }
+                    e0 = s0[i] - period
+                    if (last >= 0 && e0 < last) e0 = last
+                    lo = e0 > a ? e0 : a; hi = s1[i] < t ? s1[i] : t
+                    if (hi > lo) most += hi - lo
+                    if (s1[i] > last) last = s1[i]
                 }
             }
             if (hit) {
-                stall[c]++
                 # D-058 deadlines: URGENT 31 ms, COMMAND 62 ms.
                 over = total / 1000000 - (c == "URGENT" ? 31 : 62)
-                if (stalled >= over) covered++
-                printf "%s: late %s %s inside a guest stall of %.0f ms at %d ms (on its way %d ms to %d ms; %.1f ms over the deadline, %.1f ms of stalls on its way%s)\n", label, c, num, s1[hit] - s0[hit], s0[hit], a, t, over, stalled, (stalled >= over ? "" : ", less than it was late")
+                if (most + 0.05 >= over) {
+                    stall[c]++
+                    if (stalled >= over) covered++
+                    printf "%s: late %s %s inside a guest stall of %.0f ms at %d ms (on its way %d ms to %d ms; %.1f ms over the deadline, %.1f ms of stalls on its way, at most %.1f ms)\n", label, c, num, s1[hit] - s0[hit], s0[hit], a, t, over, stalled, most
+                    next
+                }
+                out[c]++
+                printf "%s: FAIL late %s %s meets a guest stall of %.0f ms at %d ms, but the stalls on its way (%.1f ms seen, at most %.1f ms) do not cover how late it was (%.1f ms over the deadline; on its way %d ms to %d ms, total %d ns)\n", label, c, num, s1[hit] - s0[hit], s0[hit], stalled, most, over, a, t, total
                 next
             }
             out[c]++
@@ -142,7 +161,7 @@ check)
                 printf "%s: late %s %d: inside guest stalls %d, inside faults %d, outside %d\n", label, c, late[c], stall[c], fault[c], out[c]
             }
             si = stall["URGENT"] + stall["COMMAND"]; fi = fault["URGENT"] + fault["COMMAND"]
-            printf "%s: late inside guest stalls whose stall time covers the lateness %d of %d\n", label, covered, si
+            printf "%s: late inside guest stalls whose stall time seen covers the lateness %d of %d (the rest are covered only with the probe period)\n", label, covered, si
             oi = out["URGENT"] + out["COMMAND"]
             printf "%s: late URGENT or COMMAND inside guest stalls %d, inside faults %d, outside %d\n", label, si, fi, oi
             exit oi > 0 ? 1 : 0
