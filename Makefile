@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-flood-hang panel-check measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang panel-check measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -136,6 +136,14 @@ run-long-live: upload
 	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
 	$(SCP) ./scripts/qnx-long-live.sh root@localhost:/tmp/qnx-long-live.sh
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-live.sh /tmp/stall-probe /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-live.sh 600'
+
+# The live network under supervisor with node kills (D-063).
+RESTART_S ?= 300
+RESTART_PLAN ?= all
+run-live-restart: upload
+	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
+	$(SCP) ./scripts/qnx-live-restart.sh root@localhost:/tmp/qnx-live-restart.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-live-restart.sh /tmp/stall-probe /tmp/supervisor /tmp/telemetry /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-live-restart.sh $(RESTART_S) $(RESTART_PLAN)'
 
 run-flood-hang: upload
 	$(SCP) ./scripts/qnx-flood-hang.sh root@localhost:/tmp/qnx-flood-hang.sh
