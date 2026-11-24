@@ -2,6 +2,22 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+int signal_log_quiet(void)
+{
+    static int known;
+    static int quiet;
+
+    if (!known) {
+        const char *value = getenv("SIGNAL_QUIET");
+
+        quiet = value != NULL && strcmp(value, "1") == 0;
+        known = 1;
+    }
+    return quiet;
+}
 
 enum signal_verdict signal_check(const struct signal *sig, int64_t now_ns)
 {

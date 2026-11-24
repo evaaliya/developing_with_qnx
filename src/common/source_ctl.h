@@ -33,10 +33,11 @@
 
 /*
  * Issued numbers the flood may never take, so URGENT, COMMAND, and
- * ordinary BACKGROUND keep their place on the issued list after a long
- * flood. 2048 is about 38 s of the live schedule (53 signals a second).
- * When the flood reaches the rest of the list it turns itself off and
- * "flood on" is refused for the rest of the run (D-061).
+ * ordinary BACKGROUND keep their place in the ring of numbers that are
+ * not closed yet. Closes empty that ring every 250 ms, so the flood
+ * reaches this only when closes stop coming back; it then turns itself
+ * off and may be turned on again (D-061, D-062). 2048 is about 38 s of
+ * the live schedule (53 signals a second).
  */
 #define SOURCE_FLOOD_RESERVE 2048u
 
@@ -45,8 +46,6 @@ struct source_control {
     int flood;
     int urgent_on;
     int stop;
-    /* Set once the flood has used its share of the issued list (D-061). */
-    int flood_spent;
     uint64_t issued_urgent;
     uint64_t issued_command;
     uint64_t issued_background;
@@ -80,11 +79,11 @@ uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
 unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns);
 
 /*
- * Flood signals that may still be issued, at most want. 0 once recorded
- * plus SOURCE_FLOOD_RESERVE reaches cap, or when cap is not larger than
- * the reserve (D-061).
+ * Flood signals that may still be issued, at most want. 0 once waiting
+ * (numbers not closed yet) plus SOURCE_FLOOD_RESERVE reaches cap, or
+ * when cap is not larger than the reserve (D-061, D-062).
  */
-unsigned source_flood_room(unsigned long recorded, unsigned long cap,
+unsigned source_flood_room(unsigned long waiting, unsigned long cap,
                            unsigned want);
 
 #endif

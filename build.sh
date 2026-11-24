@@ -16,9 +16,11 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/source \
     src/source/source.c src/common/signal_msg.c src/common/issue_order.c \
     src/common/issued_log.c src/common/source_ctl.c \
     src/common/net_state.c src/common/telemetry_snap.c \
-    src/common/telemetry_pub.c src/common/latency_stats.c -lsocket
+    src/common/telemetry_pub.c src/common/latency_stats.c \
+    src/common/close_list.c -lsocket
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/relay \
-    src/relay/relay.c src/common/signal_msg.c src/common/signal_queue.c
+    src/relay/relay.c src/common/signal_msg.c src/common/signal_queue.c \
+    src/common/close_list.c
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/supervisor \
     src/supervisor/supervisor.c src/common/restart_limit.c \
     src/common/node_fault.c src/common/issued_log.c \
@@ -29,3 +31,4 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/telemetry \
     src/telemetry/telemetry.c src/common/telemetry_snap.c \
     src/common/latency_stats.c src/common/net_state.c \
     src/common/signal_msg.c -lsocket
+ntoaarch64-gcc "${CFLAGS[@]}" -o build/stall-probe src/stall-probe/stall_probe.c

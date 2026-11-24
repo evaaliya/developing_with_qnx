@@ -66,10 +66,6 @@ int source_ctl_apply(struct source_control *ctl, const char *text)
         return -1;
     }
     if (strcmp(cmd, "flood on") == 0) {
-        if (ctl->flood_spent) {
-            snprintf(ctl->error, sizeof ctl->error, "flood budget used");
-            return -1;
-        }
         ctl->flood = 1;
     } else if (strcmp(cmd, "flood off") == 0) {
         ctl->flood = 0;

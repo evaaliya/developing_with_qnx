@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "close_list.h"
 #include "issue_order.h"
 #include "issued_log.h"
 #include "signal_msg.h"
@@ -320,9 +321,12 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
         return -1;
     }
 
-    printf("source: sent signal %" PRIu64 " class %s\n",
-           number, signal_class_name(class_id));
-    fflush(stdout);
+    /* A counted burst always prints: a restart rebuilds its list from it. */
+    if (!(g_ctl.live && signal_log_quiet())) {
+        printf("source: sent signal %" PRIu64 " class %s\n",
+               number, signal_class_name(class_id));
+        fflush(stdout);
+    }
     return 0;
 }
 
@@ -556,47 +560,44 @@ static int usage(void)
     return EXIT_FAILURE;
 }
 
-static int issue_one(int coid, struct signal_manifest *manifest,
-                     unsigned long *recorded, uint64_t *number,
-                     uint32_t class_id, int *full)
-{
-    int rc;
-
-    if (*full || *recorded >= SIGNAL_MANIFEST_CAP) {
-        if (!*full) {
-            fprintf(stderr, "source: the issued list is full; not sending more\n");
-            *full = 1;
-        }
-        return 0;
-    }
-    pthread_mutex_lock(&g_issue_lock);
-    if (*full || *recorded >= SIGNAL_MANIFEST_CAP) {
-        pthread_mutex_unlock(&g_issue_lock);
-        if (!*full) {
-            fprintf(stderr, "source: the issued list is full; not sending more\n");
-            *full = 1;
-        }
-        return 0;
-    }
-    rc = send_recorded(coid, manifest, recorded, number, class_id, 0);
-    pthread_mutex_unlock(&g_issue_lock);
-    if (rc != 0) {
-        return -1;
-    }
-    return 1;
-}
-
 struct live_book {
     int coid;
-    struct signal_manifest *manifest;
-    unsigned long *recorded;
+    struct issued_ring *ring;
     uint64_t *number;
-    int *full;
     int failed;
     int stop;
 };
 
 static struct live_book g_live;
+
+/*
+ * One live signal. 1 when sent, 0 when the issued ring is full (closes
+ * have stopped coming back), -1 when the send failed.
+ */
+static int issue_live(uint32_t class_id)
+{
+    uint64_t number;
+
+    pthread_mutex_lock(&g_issue_lock);
+    if (issued_ring_count(g_live.ring) >= SIGNAL_MANIFEST_CAP) {
+        pthread_mutex_unlock(&g_issue_lock);
+        return 0;
+    }
+    number = *g_live.number;
+    if (send_one(g_live.coid, number, class_id) != 0) {
+        pthread_mutex_unlock(&g_issue_lock);
+        return -1;
+    }
+    (void)issued_ring_push(g_live.ring, number, class_id, monotonic_ns());
+    (*g_live.number)++;
+    ctl_lock();
+    source_ctl_note_issued(&g_ctl, class_id);
+    ctl_unlock();
+    pthread_mutex_unlock(&g_issue_lock);
+    publish_source(0);
+    return 1;
+}
+
 static pthread_t g_flood_thread;
 static int g_flood_started;
 
@@ -629,18 +630,25 @@ static int send_flood_batch(unsigned count)
         pthread_mutex_unlock(&g_issue_lock);
         return 0;
     }
-    room = source_flood_room(*g_live.recorded, SIGNAL_MANIFEST_CAP, count);
+    /*
+     * The flood may fill the ring of numbers not closed yet only up to
+     * the reserve. Closes empty it every 250 ms, so this is reached only
+     * when closes stop coming back (D-062).
+     */
+    room = source_flood_room(issued_ring_count(g_live.ring),
+                             SIGNAL_MANIFEST_CAP, count);
     if (room == 0) {
-        unsigned long taken = *g_live.recorded;
+        unsigned waiting = issued_ring_count(g_live.ring);
 
         pthread_mutex_unlock(&g_issue_lock);
         ctl_lock();
         g_ctl.flood = 0;
-        g_ctl.flood_spent = 1;
+        snprintf(g_ctl.error, sizeof g_ctl.error,
+                 "flood stopped: %u signals wait to be closed", waiting);
         ctl_unlock();
-        printf("source: flood budget used at %lu of %u issued numbers, "
-               "%u kept for the live schedule; flood off (D-061)\n",
-               taken, (unsigned)SIGNAL_MANIFEST_CAP,
+        printf("source: flood stopped, %u of %u issued numbers wait to be "
+               "closed, %u kept for the live schedule (D-062)\n",
+               waiting, (unsigned)SIGNAL_MANIFEST_CAP,
                (unsigned)SOURCE_FLOOD_RESERVE);
         fflush(stdout);
         publish_source(0);
@@ -648,24 +656,17 @@ static int send_flood_batch(unsigned count)
     }
     count = room;
     for (i = 0; i < count; i++) {
-        if (*g_live.full || *g_live.recorded >= SIGNAL_MANIFEST_CAP) {
-            if (!*g_live.full) {
-                fprintf(stderr,
-                        "source: the issued list is full; not sending more\n");
-                *g_live.full = 1;
-            }
+        if (issued_ring_push(g_live.ring, *g_live.number,
+                             SIGNAL_CLASS_BACKGROUND, now) != 0) {
             break;
         }
         batch.body[sent_n].number = *g_live.number;
         batch.body[sent_n].class_id = SIGNAL_CLASS_BACKGROUND;
         batch.body[sent_n].issued_ns = now;
         batch.body[sent_n].deadline_ns = deadline;
-        g_live.manifest->item[*g_live.recorded].number = *g_live.number;
-        g_live.manifest->item[*g_live.recorded].class_id = SIGNAL_CLASS_BACKGROUND;
         ctl_lock();
         source_ctl_note_issued(&g_ctl, SIGNAL_CLASS_BACKGROUND);
         ctl_unlock();
-        (*g_live.recorded)++;
         (*g_live.number)++;
         sent_n++;
     }
@@ -704,14 +705,17 @@ static int send_flood_batch(unsigned count)
         pthread_mutex_unlock(&g_issue_lock);
         return -1;
     }
-    for (i = 0; i < sent_n; i++) {
-        printf("source: sent signal %" PRIu64 " class %s\n",
-               batch.body[i].number, signal_class_name(SIGNAL_CLASS_BACKGROUND));
-        printf("source: flood signal %" PRIu64 " at %lld ns\n",
-               batch.body[i].number, (long long)now);
+    if (!signal_log_quiet()) {
+        for (i = 0; i < sent_n; i++) {
+            printf("source: sent signal %" PRIu64 " class %s\n",
+                   batch.body[i].number,
+                   signal_class_name(SIGNAL_CLASS_BACKGROUND));
+            printf("source: flood signal %" PRIu64 " at %lld ns\n",
+                   batch.body[i].number, (long long)now);
+        }
+        printf("source: flood batch %u at %lld ns\n", sent_n, (long long)now);
+        fflush(stdout);
     }
-    printf("source: flood batch %u at %lld ns\n", sent_n, (long long)now);
-    fflush(stdout);
     publish_source(0);
     return 1;
 }
@@ -771,7 +775,7 @@ static void *flood_thread(void *arg)
  * the sender. A stopped relay never answers, so the run does not wait
  * for this thread forever; exit ends it (D-061).
  */
-static int join_flood_thread(void)
+static int join_thread(pthread_t thread, const char *what)
 {
     struct timespec until;
     int rc;
@@ -782,24 +786,107 @@ static int join_flood_thread(void)
         return -1;
     }
     until.tv_sec += (time_t)SEND_TIMEOUT_SECONDS + 1;
-    rc = pthread_timedjoin_monotonic(g_flood_thread, NULL, &until);
+    rc = pthread_timedjoin_monotonic(thread, NULL, &until);
     if (rc == ETIMEDOUT) {
-        fprintf(stderr, "source: the flood thread is still waiting for the "
+        fprintf(stderr, "source: the %s thread is still waiting for the "
                 "next node after %u s; ending the run without it\n",
-                SEND_TIMEOUT_SECONDS + 1);
+                what, SEND_TIMEOUT_SECONDS + 1);
         return -1;
     }
     if (rc != EOK) {
-        fprintf(stderr, "source: joining the flood thread failed: %s\n",
-                strerror(rc));
+        fprintf(stderr, "source: joining the %s thread failed: %s\n",
+                what, strerror(rc));
         return -1;
     }
     return 0;
 }
 
+static int join_flood_thread(void)
+{
+    return join_thread(g_flood_thread, "flood");
+}
+
+static pthread_t g_close_thread;
+static int g_close_started;
+
+/*
+ * Every CLOSE_PERIOD_NS, close the numbers issued at least
+ * CLOSE_SETTLE_NS ago: send them through the chain and drop them from
+ * the ring once sink has them. BACKGROUND priority, so the flood does
+ * not starve it and URGENT and COMMAND go first. A failed close keeps
+ * the numbers and is tried again (D-062).
+ */
+static void *close_thread(void *arg)
+{
+    static struct signal_close close;
+    struct timespec pause;
+    int failing = 0;
+
+    (void)arg;
+    if (pin_cpu0() != 0 || set_fifo(SIGNAL_PRIO_BACKGROUND) != 0) {
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return NULL;
+    }
+    memset(&pause, 0, sizeof pause);
+    pause.tv_nsec = (long)CLOSE_PERIOD_NS;
+    for (;;) {
+        unsigned n;
+        unsigned waiting;
+        long sent;
+        int stop;
+
+        nanosleep(&pause, NULL);
+        pthread_mutex_lock(&g_issue_lock);
+        stop = g_live.stop || g_live.failed;
+        n = stop ? 0 : issued_ring_closable(g_live.ring, monotonic_ns(),
+                                            CLOSE_SETTLE_NS, close.item,
+                                            SIGNAL_CLOSE_CAP);
+        pthread_mutex_unlock(&g_issue_lock);
+        if (stop) {
+            break;
+        }
+        if (n == 0) {
+            continue;
+        }
+        close.type = SIGNAL_MSG_CLOSE;
+        close.count = (uint16_t)n;
+        close.reserved = 0;
+        if (arm_send_timeout(SEND_TIMEOUT_SECONDS) != 0) {
+            continue;
+        }
+        sent = MsgSend(g_live.coid, &close, sizeof close, NULL, 0);
+        if (sent == -1 || sent != EOK) {
+            if (!failing) {
+                fprintf(stderr, "source: closing signals %" PRIu64 "..%" PRIu64
+                        " failed: %s; keeping them and trying again\n",
+                        close.item[0].number, close.item[n - 1].number,
+                        sent == -1 ? strerror(errno) : strerror((int)sent));
+                failing = 1;
+            }
+            continue;
+        }
+        pthread_mutex_lock(&g_issue_lock);
+        issued_ring_drop_front(g_live.ring, n);
+        waiting = issued_ring_count(g_live.ring);
+        pthread_mutex_unlock(&g_issue_lock);
+        if (failing) {
+            printf("source: closes are coming back again\n");
+            failing = 0;
+        }
+        printf("source: closed %u signals %" PRIu64 "..%" PRIu64
+               ", waiting %u\n",
+               n, close.item[0].number, close.item[n - 1].number, waiting);
+        fflush(stdout);
+    }
+    return NULL;
+}
+
 static int run_live(int argc, char **argv)
 {
     static struct signal_manifest manifest;
+    static struct issued_ring ring;
     struct sigevent event;
     struct itimerspec spec;
     int64_t next_ns[3];
@@ -903,10 +990,9 @@ static int run_live(int argc, char **argv)
     next_ns[2] = 0;
     memset(&g_live, 0, sizeof g_live);
     g_live.coid = coid;
-    g_live.manifest = &manifest;
-    g_live.recorded = &recorded;
+    issued_ring_init(&ring);
+    g_live.ring = &ring;
     g_live.number = &number;
-    g_live.full = &full;
     if (pthread_create(&g_flood_thread, NULL, flood_thread, NULL) != 0) {
         fprintf(stderr, "source: creating the flood thread failed: %s\n",
                 strerror(errno));
@@ -914,6 +1000,13 @@ static int run_live(int argc, char **argv)
         return EXIT_FAILURE;
     }
     g_flood_started = 1;
+    if (pthread_create(&g_close_thread, NULL, close_thread, NULL) != 0) {
+        fprintf(stderr, "source: creating the close thread failed: %s\n",
+                strerror(errno));
+        name_close(coid);
+        return EXIT_FAILURE;
+    }
+    g_close_started = 1;
 
     for (;;) {
         struct _pulse pulse;
@@ -965,7 +1058,7 @@ static int run_live(int argc, char **argv)
             break;
         }
 
-        if (!full) {
+        {
             for (;;) {
                 uint32_t class_id;
                 int64_t now;
@@ -973,7 +1066,7 @@ static int run_live(int argc, char **argv)
                 ctl_lock();
                 stop = g_ctl.stop;
                 ctl_unlock();
-                if (stop || full) {
+                if (stop) {
                     break;
                 }
                 now = monotonic_ns();
@@ -984,15 +1077,25 @@ static int run_live(int argc, char **argv)
                     break;
                 }
                 {
-                    int issued = issue_one(coid, &manifest, &recorded, &number,
-                                           class_id, &full);
+                    int issued = issue_live(class_id);
 
                     if (issued < 0) {
                         failed = 1;
                         break;
                     }
                     if (issued == 0) {
+                        /* Closes stopped coming back; nothing can be issued. */
+                        if (!full) {
+                            fprintf(stderr, "source: the issued list is full; "
+                                    "waiting for closes before sending more\n");
+                            full = 1;
+                        }
                         break;
+                    }
+                    if (full) {
+                        printf("source: the issued list has room again\n");
+                        fflush(stdout);
+                        full = 0;
                     }
                 }
             }
@@ -1014,6 +1117,12 @@ static int run_live(int argc, char **argv)
         }
         g_flood_started = 0;
     }
+    if (g_close_started) {
+        if (join_thread(g_close_thread, "close") != 0) {
+            failed = 1;
+        }
+        g_close_started = 0;
+    }
 
     memset(&spec, 0, sizeof spec);
     if (timer_settime(ticker, 0, &spec, NULL) == -1) {
@@ -1021,6 +1130,8 @@ static int run_live(int argc, char **argv)
                 strerror(errno));
         failed = 1;
     }
+    /* The manifest closes whatever the close thread had not closed yet. */
+    recorded = issued_ring_all(&ring, manifest.item, SIGNAL_MANIFEST_CAP);
     if (send_manifest(coid, &manifest, recorded) != 0) {
         name_close(coid);
         return EXIT_FAILURE;
@@ -1030,7 +1141,13 @@ static int run_live(int argc, char **argv)
                 next_name, strerror(errno));
         return EXIT_FAILURE;
     }
-    printf("source: sent %lu signals\n", recorded);
+    printf("source: sent %llu signals\n", (unsigned long long)(number - 1));
+    ctl_lock();
+    printf("source: issued URGENT %llu COMMAND %llu BACKGROUND %llu\n",
+           (unsigned long long)g_ctl.issued_urgent,
+           (unsigned long long)g_ctl.issued_command,
+           (unsigned long long)g_ctl.issued_background);
+    ctl_unlock();
     fflush(stdout);
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }

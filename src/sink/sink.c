@@ -34,30 +34,12 @@ static enum net_state current_state = NET_INIT;
 static struct telem_window hop_window[3];
 static int telemetry_on;
 
+/* Whole-run totals are kept by the ledger; no pass over the ring (D-062). */
 static void class_counts(const struct signal_ledger *ledger, uint32_t id,
                          unsigned *on_time, unsigned *late, unsigned *lost,
                          unsigned *dropped)
 {
-    unsigned number;
-
-    *on_time = 0;
-    *late = 0;
-    *lost = 0;
-    *dropped = 0;
-    for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
-        if (ledger->class_id[number] != id) {
-            continue;
-        }
-        if (ledger->account[number] == SIGNAL_ACCOUNT_ON_TIME) {
-            (*on_time)++;
-        } else if (ledger->account[number] == SIGNAL_ACCOUNT_LATE) {
-            (*late)++;
-        } else if (ledger->account[number] == SIGNAL_ACCOUNT_LOST) {
-            (*lost)++;
-        } else if (ledger->account[number] == SIGNAL_ACCOUNT_DROPPED) {
-            (*dropped)++;
-        }
-    }
+    signal_ledger_counts(ledger, id, on_time, late, lost, dropped);
 }
 
 static void publish_sink(const struct signal_ledger *ledger,
@@ -103,6 +85,7 @@ struct receive_buffer {
         struct _pulse pulse;
         struct signal_message message;
         struct signal_manifest manifest;
+        struct signal_close close;
         struct signal_lock lock;
         struct signal_dropped dropped;
     } body;
@@ -195,12 +178,25 @@ static int parse_count(const char *text, unsigned long *out, int allow_zero)
     return 0;
 }
 
+/*
+ * CLOCK_MONOTONIC in milliseconds. Quiet lines carry it so they can be
+ * matched with stall-probe lines from the same guest (B22).
+ */
+static long long run_ms(void)
+{
+    return (long long)(monotonic_ns() / 1000000LL);
+}
+
 static void show_state(enum net_state *shown, enum net_state now)
 {
     current_state = now;
     if (*shown != now) {
         *shown = now;
-        printf("sink: state %s\n", net_state_name(now));
+        if (signal_log_quiet()) {
+            printf("sink: state %s at %lld ms\n", net_state_name(now), run_ms());
+        } else {
+            printf("sink: state %s\n", net_state_name(now));
+        }
         fflush(stdout);
     }
     if (pub_ledger != NULL) {
@@ -265,28 +261,68 @@ static void print_summary(const struct signal_ledger *ledger)
     publish_sink(ledger, current_state, 1);
 }
 
-static void print_lost(const struct signal_ledger *ledger, uint64_t number)
+static void print_lost(uint64_t number, uint32_t class_id)
 {
     printf("sink: lost signal %" PRIu64 " class %s\n",
-           number, signal_class_name(ledger->class_id[number]));
+           number, signal_class_name(class_id));
     fflush(stdout);
 }
 
-static int close_books(struct signal_ledger *ledger)
+/*
+ * Puts a list of issued numbers on the books: issue each, record the
+ * drops a relay marked, and count every number that neither arrived
+ * nor was dropped as lost. The manifest and each close use it (D-062).
+ * 0, or -1 with a message when the ledger refused a number.
+ */
+static int close_items(struct signal_ledger *ledger,
+                       const struct signal_manifest_item *items, unsigned n,
+                       const char *what, unsigned *lost_out,
+                       unsigned *dropped_out)
 {
-    unsigned number;
+    unsigned item;
+    unsigned lost = 0;
+    unsigned dropped = 0;
 
-    for (number = 1; number <= SIGNAL_LEDGER_CAP; number++) {
-        if (!ledger->issued[number] ||
-            ledger->account[number] != SIGNAL_ACCOUNT_NONE) {
-            continue;
-        }
-        if (signal_ledger_lose(ledger, number, ledger->class_id[number]) != 0) {
+    for (item = 0; item < n; item++) {
+        if (signal_ledger_issue(ledger, items[item].number,
+                                items[item].class_id) != 0) {
+            fprintf(stderr,
+                    "sink: the %s repeats signal %" PRIu64 ", or its ledger "
+                    "slot still holds a number that is not closed\n",
+                    what, items[item].number);
             return -1;
         }
-        print_lost(ledger, number);
     }
-    return signal_ledger_unaccounted(ledger) == 0 ? 0 : -1;
+    for (item = 0; item < n; item++) {
+        if (items[item].reserved != SIGNAL_MANIFEST_DROPPED) {
+            continue;
+        }
+        if (signal_ledger_drop(ledger, items[item].number) != 0) {
+            fprintf(stderr,
+                    "sink: could not record dropped signal %" PRIu64 "\n",
+                    items[item].number);
+            return -1;
+        }
+        dropped++;
+    }
+    for (item = 0; item < n; item++) {
+        if (!signal_ledger_is_open(ledger, items[item].number)) {
+            continue;
+        }
+        if (signal_ledger_lose(ledger, items[item].number,
+                               items[item].class_id) != 0) {
+            return -1;
+        }
+        print_lost(items[item].number, items[item].class_id);
+        lost++;
+    }
+    if (lost_out != NULL) {
+        *lost_out = lost;
+    }
+    if (dropped_out != NULL) {
+        *dropped_out = dropped;
+    }
+    return 0;
 }
 
 static int arm_receive(uint64_t gap_ns)
@@ -475,6 +511,49 @@ int main(int argc, char **argv)
             return EXIT_SUCCESS;
         }
 
+        if (buffer.body.message.type == SIGNAL_MSG_CLOSE &&
+            info.msglen >= (ssize_t)sizeof(struct signal_close)) {
+            unsigned lost = 0;
+            unsigned dropped = 0;
+            unsigned n = buffer.body.close.count;
+            int64_t close_start;
+
+            if (n == 0 || n > SIGNAL_CLOSE_CAP) {
+                if (reject(rcvid, EINVAL, "rejecting a close failed") == -1) {
+                    print_summary(&ledger);
+                    detach(attach);
+                    return EXIT_FAILURE;
+                }
+                continue;
+            }
+            close_start = monotonic_ns();
+            if (close_items(&ledger, buffer.body.close.item, n, "close", &lost,
+                            &dropped) != 0) {
+                (void)reject(rcvid, EINVAL, "rejecting a close failed");
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "sink: replying to a close failed: %s\n",
+                        strerror(errno));
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
+            }
+            /* The books moved, so the run is not stuck (D-062). */
+            alarm(SAFETY_SECONDS);
+            printf("sink: closed %u signals %" PRIu64 "..%" PRIu64
+                   ", lost %u, dropped %u, open %u, took %lld ns\n",
+                   n, buffer.body.close.item[0].number,
+                   buffer.body.close.item[n - 1].number, lost, dropped,
+                   signal_ledger_unaccounted(&ledger),
+                   (long long)(monotonic_ns() - close_start));
+            fflush(stdout);
+            show_state(&shown, machine.state);
+            continue;
+        }
+
         if (buffer.body.message.type == SIGNAL_MSG_MANIFEST &&
             info.msglen >= (ssize_t)sizeof(struct signal_manifest)) {
             unsigned item;
@@ -494,20 +573,26 @@ int main(int argc, char **argv)
                 detach(attach);
                 return EXIT_FAILURE;
             }
-            for (item = 0; item < buffer.body.manifest.count; item++) {
-                struct signal_manifest_item *one = &buffer.body.manifest.item[item];
-
-                if (signal_ledger_issue(&ledger, one->number, one->class_id) != 0) {
-                    fprintf(stderr,
-                            "sink: manifest repeats signal %" PRIu64 " or uses a "
-                            "number outside 1..%d\n",
-                            one->number, SIGNAL_LEDGER_CAP);
-                    print_summary(&ledger);
-                    detach(attach);
-                    return EXIT_FAILURE;
-                }
+            if (close_items(&ledger, buffer.body.manifest.item,
+                            buffer.body.manifest.count, "manifest", NULL,
+                            &item) != 0) {
+                print_summary(&ledger);
+                detach(attach);
+                return EXIT_FAILURE;
             }
             manifest_seen = 1;
+            if (item > 0) {
+                unsigned i;
+
+                for (i = 0; i < buffer.body.manifest.count; i++) {
+                    if (buffer.body.manifest.item[i].reserved ==
+                        SIGNAL_MANIFEST_DROPPED) {
+                        show_state(&shown, net_machine_on_dropped(
+                                       &machine,
+                                       buffer.body.manifest.item[i].class_id));
+                    }
+                }
+            }
             if (issued_list_is_rebuilt(buffer.body.manifest.reserved)) {
                 printf("sink: %s\n", issued_list_rebuilt_sentence());
                 fflush(stdout);
@@ -521,24 +606,7 @@ int main(int argc, char **argv)
                     fflush(stdout);
                 }
             }
-            for (item = 0; item < buffer.body.manifest.count; item++) {
-                struct signal_manifest_item *one = &buffer.body.manifest.item[item];
-
-                if (one->reserved != SIGNAL_MANIFEST_DROPPED) {
-                    continue;
-                }
-                if (signal_ledger_drop(&ledger, one->number) != 0) {
-                    fprintf(stderr,
-                            "sink: could not record dropped signal %" PRIu64 "\n",
-                            one->number);
-                    print_summary(&ledger);
-                    detach(attach);
-                    return EXIT_FAILURE;
-                }
-                show_state(&shown,
-                           net_machine_on_dropped(&machine, one->class_id));
-            }
-            if (close_books(&ledger) != 0) {
+            if (signal_ledger_unaccounted(&ledger) != 0) {
                 fprintf(stderr, "sink: the manifest left a signal unaccounted\n");
                 print_summary(&ledger);
                 detach(attach);
@@ -594,7 +662,14 @@ int main(int argc, char **argv)
         }
         net_machine_on_signal(&machine, buffer.body.message.body.class_id,
                               verdict, now_ns, &presentation);
-        print_signal(&buffer.body.message.body, verdict, presentation, now_ns);
+        /* Quiet runs still print every late signal, with the run time. */
+        if (!signal_log_quiet() || verdict != SIGNAL_ON_TIME) {
+            if (signal_log_quiet()) {
+                printf("sink: at %lld ms ", run_ms());
+            }
+            print_signal(&buffer.body.message.body, verdict, presentation,
+                         now_ns);
+        }
         show_state(&shown, machine.state);
     }
 

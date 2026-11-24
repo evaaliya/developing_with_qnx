@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "close_list.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
@@ -50,8 +51,16 @@ struct relay {
     rcvid_t manifest_rcvid;
     struct signal_manifest manifest;
     size_t capacity;
+    /* Numbers this relay dropped that no close or manifest has carried yet. */
+    pthread_mutex_t drop_lock;
     uint64_t dropped[SIGNAL_MANIFEST_CAP];
     unsigned dropped_count;
+    /* One close at a time, passed on by the close thread (D-062). */
+    pthread_t closer;
+    pthread_cond_t close_ready;
+    int close_waiting;
+    rcvid_t close_rcvid;
+    struct signal_close close;
 };
 
 static int set_fifo(const char *who, int priority)
@@ -207,11 +216,15 @@ static void write_lost(const struct relay *node, const struct signal *sig)
 /* Receive thread only. The forward thread reads the marked manifest. */
 static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
 {
-    printf("relay %s: dropped signal %" PRIu64 " class %s at %lld ns\n",
-           node->own_name, number, signal_class_name(class_id),
-           (long long)monotonic_ns(node->own_name));
-    fflush(stdout);
+    if (!signal_log_quiet()) {
+        printf("relay %s: dropped signal %" PRIu64 " class %s at %lld ns\n",
+               node->own_name, number, signal_class_name(class_id),
+               (long long)monotonic_ns(node->own_name));
+        fflush(stdout);
+    }
+    pthread_mutex_lock(&node->drop_lock);
     if (node->dropped_count >= SIGNAL_MANIFEST_CAP) {
+        pthread_mutex_unlock(&node->drop_lock);
         fprintf(stderr,
                 "relay %s: the dropped list is full, signal %" PRIu64
                 " will not be marked on the manifest\n",
@@ -219,6 +232,7 @@ static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
         return;
     }
     node->dropped[node->dropped_count++] = number;
+    pthread_mutex_unlock(&node->drop_lock);
 }
 
 static void mark_dropped(struct relay *node, struct signal_manifest *manifest)
@@ -229,6 +243,7 @@ static void mark_dropped(struct relay *node, struct signal_manifest *manifest)
     if (count > SIGNAL_MANIFEST_CAP) {
         count = SIGNAL_MANIFEST_CAP;
     }
+    pthread_mutex_lock(&node->drop_lock);
     for (i = 0; i < count; i++) {
         unsigned d;
 
@@ -240,6 +255,7 @@ static void mark_dropped(struct relay *node, struct signal_manifest *manifest)
             break;
         }
     }
+    pthread_mutex_unlock(&node->drop_lock);
 }
 
 /* The caller holds node->lock. */
@@ -326,6 +342,84 @@ static void format_waiting(const struct signal_queue *q, char *buf, size_t buf_l
         }
         used += (size_t)wrote;
     }
+}
+
+/*
+ * Passes each close on to the next node, outside the signal queue, so a
+ * close neither waits for an empty queue nor holds up a queued URGENT.
+ * It runs at BACKGROUND priority: below URGENT and COMMAND, and not
+ * starved by the flood, which also runs at BACKGROUND (D-062). The
+ * previous node is answered only after the next node took the close,
+ * so source keeps the numbers until the whole chain has them.
+ */
+static void *close_main(void *arg)
+{
+    struct relay *node = arg;
+    static struct signal_close close;
+
+    if (pin_cpu0(node->own_name) != 0 ||
+        set_fifo(node->own_name, SIGNAL_PRIO_BACKGROUND) != 0) {
+        exit(EXIT_FAILURE);
+    }
+    for (;;) {
+        rcvid_t rcvid;
+        int coid;
+        int marked;
+        long sent;
+        unsigned n;
+
+        pthread_mutex_lock(&node->lock);
+        while (!node->close_waiting) {
+            pthread_cond_wait(&node->close_ready, &node->lock);
+        }
+        close = node->close;
+        rcvid = node->close_rcvid;
+        coid = node->next_coid;
+        pthread_mutex_unlock(&node->lock);
+        n = close.count;
+
+        pthread_mutex_lock(&node->drop_lock);
+        marked = close_mark_dropped(close.item, n, node->dropped,
+                                    node->dropped_count);
+        pthread_mutex_unlock(&node->drop_lock);
+        if (marked < 0) {
+            fprintf(stderr, "relay %s: a close is not in number order\n",
+                    node->own_name);
+            sent = EINVAL;
+        } else if (coid < 0) {
+            sent = EAGAIN;
+        } else {
+            sent = MsgSend(coid, &close, sizeof close, NULL, 0);
+            if (sent == -1) {
+                sent = errno;
+                fprintf(stderr, "relay %s: passing a close to %s failed: %s\n",
+                        node->own_name, node->next_name, strerror(errno));
+            }
+        }
+        if (sent == EOK) {
+            pthread_mutex_lock(&node->drop_lock);
+            node->dropped_count = close_forget_dropped(
+                node->dropped, node->dropped_count, close.item[0].number,
+                close.item[n - 1].number);
+            pthread_mutex_unlock(&node->drop_lock);
+            if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
+                fprintf(stderr, "relay %s: replying to a close failed: %s\n",
+                        node->own_name, strerror(errno));
+            }
+            printf("relay %s: passed close of %u signals %" PRIu64 "..%" PRIu64
+                   ", marked dropped %d\n",
+                   node->own_name, n, close.item[0].number,
+                   close.item[n - 1].number, marked);
+            fflush(stdout);
+        } else if (MsgError(rcvid, (int)sent) == -1) {
+            fprintf(stderr, "relay %s: rejecting a close failed: %s\n",
+                    node->own_name, strerror(errno));
+        }
+        pthread_mutex_lock(&node->lock);
+        node->close_waiting = 0;
+        pthread_mutex_unlock(&node->lock);
+    }
+    return NULL;
 }
 
 static void *forward_main(void *arg)
@@ -518,14 +612,16 @@ static void *forward_main(void *arg)
             exit(EXIT_FAILURE);
         }
 
-        printf("relay %s: sent signal %" PRIu64
-               " class %s; still waiting: %s arrived %" PRId64
-               " start %" PRId64 " end %" PRId64 " picked %" PRId64 "\n",
-               node->own_name, item.body.number,
-               signal_class_name(item.body.class_id),
-               waiting[0] == '\0' ? "none" : waiting,
-               arrived_ns, start_ns, end_ns, picked_ns);
-        fflush(stdout);
+        if (!signal_log_quiet()) {
+            printf("relay %s: sent signal %" PRIu64
+                   " class %s; still waiting: %s arrived %" PRId64
+                   " start %" PRId64 " end %" PRId64 " picked %" PRId64 "\n",
+                   node->own_name, item.body.number,
+                   signal_class_name(item.body.class_id),
+                   waiting[0] == '\0' ? "none" : waiting,
+                   arrived_ns, start_ns, end_ns, picked_ns);
+            fflush(stdout);
+        }
     }
     return NULL;
 }
@@ -651,10 +747,12 @@ static int admit_batch(struct relay *node, const struct signal_batch *batch,
      * The queue occupancy at arrival shows whether the chain drained
      * between batches. A drained queue reads 0 (D-060).
      */
-    printf("relay %s: batch %u queued %u dropped %u waiting before %u\n",
-           node->own_name, n, n - dropped_n - lost_n, dropped_n,
-           waiting_before);
-    fflush(stdout);
+    if (!signal_log_quiet()) {
+        printf("relay %s: batch %u queued %u dropped %u waiting before %u\n",
+               node->own_name, n, n - dropped_n - lost_n, dropped_n,
+               waiting_before);
+        fflush(stdout);
+    }
     /*
      * One notice per batch is enough to move sink to DEGRADED; the
      * manifest still marks every dropped number. One MsgSend per drop
@@ -786,6 +884,7 @@ int main(int argc, char **argv)
         struct _pulse pulse;
         struct signal_message message;
         struct signal_manifest manifest;
+        struct signal_close close;
         struct signal_batch batch;
         struct signal_dropped dropped;
     } buffer;
@@ -806,6 +905,8 @@ int main(int argc, char **argv)
     signal_queue_init(&node.queue);
     pthread_mutex_init(&node.lock, NULL);
     pthread_cond_init(&node.ready, NULL);
+    pthread_mutex_init(&node.drop_lock, NULL);
+    pthread_cond_init(&node.close_ready, NULL);
     node.next_order = 1;
 
     if (pin_cpu0(node.own_name) != 0) {
@@ -861,6 +962,13 @@ int main(int argc, char **argv)
     create_rc = pthread_create(&node.forward, NULL, forward_main, &node);
     if (create_rc != 0) {
         fprintf(stderr, "relay %s: could not start the forward thread: %s\n",
+                node.own_name, strerror(create_rc));
+        name_detach(attach, 0);
+        return EXIT_FAILURE;
+    }
+    create_rc = pthread_create(&node.closer, NULL, close_main, &node);
+    if (create_rc != 0) {
+        fprintf(stderr, "relay %s: could not start the close thread: %s\n",
                 node.own_name, strerror(create_rc));
         name_detach(attach, 0);
         return EXIT_FAILURE;
@@ -973,6 +1081,38 @@ int main(int argc, char **argv)
             node.manifest_waiting = 1;
             wake_forward_locked(&node);
             pthread_mutex_unlock(&node.lock);
+            if (set_fifo(node.own_name, node.own_priority) != 0) {
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+
+        if (buffer.message.type == SIGNAL_MSG_CLOSE) {
+            if (info.msglen < (ssize_t)sizeof(struct signal_close) ||
+                buffer.close.count == 0 ||
+                buffer.close.count > SIGNAL_CLOSE_CAP) {
+                fprintf(stderr, "relay %s: the close is the wrong size\n",
+                        node.own_name);
+                if (reject(node.own_name, rcvid, EINVAL,
+                           "rejecting the close failed") != 0) {
+                    return EXIT_FAILURE;
+                }
+            } else {
+                pthread_mutex_lock(&node.lock);
+                if (node.close_waiting) {
+                    pthread_mutex_unlock(&node.lock);
+                    if (reject(node.own_name, rcvid, EBUSY,
+                               "rejecting a second close failed") != 0) {
+                        return EXIT_FAILURE;
+                    }
+                } else {
+                    node.close = buffer.close;
+                    node.close_rcvid = rcvid;
+                    node.close_waiting = 1;
+                    pthread_cond_signal(&node.close_ready);
+                    pthread_mutex_unlock(&node.lock);
+                }
+            }
             if (set_fifo(node.own_name, node.own_priority) != 0) {
                 return EXIT_FAILURE;
             }

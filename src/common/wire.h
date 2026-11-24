@@ -25,12 +25,23 @@
  * The ledger still closes the number from the manifest (D-059).
  */
 #define SIGNAL_MSG_DROPPED ((uint16_t)516)
+/*
+ * Closes the oldest issued numbers while the network runs (D-062). The
+ * same items as the manifest; relays mark their drops and pass it on
+ * from their own close thread, outside the signal queue.
+ */
+#define SIGNAL_MSG_CLOSE ((uint16_t)517)
 
 /*
  * Live S1 needs at least 100 URGENT (20 ms period, 5 s window) plus
- * COMMAND, ordinary BACKGROUND, and the flood batches (D-059).
+ * COMMAND, ordinary BACKGROUND, and the flood batches (D-059). In live
+ * mode this is the most numbers that may wait to be closed at once,
+ * not a limit on the run (D-062).
  */
 #define SIGNAL_MANIFEST_CAP 12288
+
+/* Items in one close message. About 0.7 s of flood at 1440 a second. */
+#define SIGNAL_CLOSE_CAP 1024
 
 /* Larger than the ordinary relay queue, so one batch overflows it. */
 #define SIGNAL_BATCH_MAX 72
@@ -55,6 +66,13 @@ struct signal_manifest {
     uint16_t count;
     uint32_t reserved;
     struct signal_manifest_item item[SIGNAL_MANIFEST_CAP];
+};
+
+struct signal_close {
+    uint16_t type;
+    uint16_t count;
+    uint32_t reserved;
+    struct signal_manifest_item item[SIGNAL_CLOSE_CAP];
 };
 
 struct signal_batch {

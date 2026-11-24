@@ -284,17 +284,8 @@ int main(void)
     }
 
     source_ctl_init(&ctl, 1);
-    ctl.flood_spent = 1;
-    expect_int("flood on after the budget is refused",
-               source_ctl_apply(&ctl, "flood on"), -1);
-    expect_int("spent flood stays off", ctl.flood, 0);
-    expect_text("spent flood error", ctl.error, "flood budget used");
-    expect_int("mute still works after the budget",
-               source_ctl_apply(&ctl, "mute"), 0);
-    expect_int("flood off still works after the budget",
-               source_ctl_apply(&ctl, "flood off"), 0);
-    expect_int("stop still works after the budget",
-               source_ctl_apply(&ctl, "stop"), 0);
+    expect_int("flood on is accepted again after the flood stopped itself",
+               source_ctl_apply(&ctl, "flood on"), 0);
 
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);

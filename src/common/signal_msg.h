@@ -56,4 +56,11 @@ int64_t signal_class_deadline_ns(uint32_t class_id);
 const char *signal_class_name(uint32_t class_id);
 const char *signal_verdict_name(enum signal_verdict verdict);
 
+/*
+ * 1 when SIGNAL_QUIET is "1": nodes skip the line per signal and keep
+ * states, closes, losses, errors, and totals. A long live run otherwise
+ * fills the guest's /tmp (62 MB) in about a minute of flood (D-062).
+ */
+int signal_log_quiet(void);
+
 #endif
