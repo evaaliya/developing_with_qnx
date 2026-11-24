@@ -5,10 +5,13 @@
 #   /usr/bin/ruby scripts/host-panel.rb
 # It reads telemetry text from localhost:8000 and serves the page on
 # 127.0.0.1:8765. Pass --no-browser to leave the browser closed.
+# The buttons write flood on, flood off, mute, or restore to
+# /dev/signal-source on the guest over ssh (port 2222); see panel_control.rb.
 
 require "json"
 require "socket"
 require "webrick"
+require_relative "panel_control"
 require_relative "panel_view"
 
 HOST = "127.0.0.1"
@@ -137,8 +140,33 @@ end
 server.mount_proc "/" do |_req, res|
   sample = model.sample(Time.now.to_f)
   body = PanelView.page(PanelView.render_fragment(sample[:view]), "Signal network")
+  buttons = PanelControl::COMMANDS.keys.map do |name|
+    "<button type=\"button\" data-command=\"#{name}\">#{PanelView.h(PanelControl::LABELS[name])}</button>"
+  end
+  controls = "<div class=\"controls\">#{buttons.join(" ")}" \
+    "<p id=\"command-result\" class=\"detail\">no command sent yet</p></div>"
+  body.sub!("</body>", controls + "\n</body>")
   body.sub!("</body>", <<'JS')
 <script>
+document.querySelectorAll("button[data-command]").forEach(function (button) {
+  button.addEventListener("click", async function () {
+    const out = document.getElementById("command-result");
+    out.textContent = "sending " + button.dataset.command + " ...";
+    try {
+      const res = await fetch("/command", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"X-Panel-Command": "1", "Content-Type": "application/x-www-form-urlencoded"},
+        body: "name=" + encodeURIComponent(button.dataset.command)
+      });
+      out.textContent = await res.text();
+      out.className = res.ok ? "detail" : "detail command-failed";
+    } catch (error) {
+      out.textContent = "the panel server did not answer";
+      out.className = "detail command-failed";
+    }
+  });
+});
 async function tick() {
   try {
     const res = await fetch("/fragment", {cache: "no-store"});
@@ -172,6 +200,28 @@ server.mount_proc "/safe" do |_req, res|
   res["Content-Type"] = "text/html; charset=utf-8"
   res["Cache-Control"] = "no-store"
   res.body = PanelView.page(fragment, "Signal network, captured in SAFE")
+end
+
+command_lock = Mutex.new
+page_host = "#{HOST}:#{PAGE_PORT}"
+
+server.mount_proc "/command" do |req, res|
+  res["Content-Type"] = "text/plain; charset=utf-8"
+  res["Cache-Control"] = "no-store"
+  unless PanelControl.request_allowed?(req.request_method, req["Host"], req["Origin"],
+                                       req[PanelControl::HEADER], page_host)
+    res.status = 403
+    res.body = "refused: commands come only from the panel page"
+    next
+  end
+  name = req.query["name"].to_s
+  result = command_lock.synchronize { PanelControl.send_command(name) }
+  stamp = Time.now.strftime("%H:%M:%S")
+  puts "#{stamp} panel: command #{name} #{result[:ok] ? 'sent' : 'failed'}" \
+    "#{result[:ok] ? '' : ': ' + result[:error].strip}"
+  $stdout.flush
+  res.status = result[:ok] ? 200 : (result[:command].nil? ? 400 : 502)
+  res.body = "#{stamp} #{PanelControl.result_text(result)}"
 end
 
 server.mount_proc "/text" do |_req, res|

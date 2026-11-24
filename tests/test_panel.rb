@@ -3,6 +3,7 @@
 
 # Parser and staleness rule for the host panel. No network.
 
+require_relative "../scripts/panel_control"
 require_relative "../scripts/panel_view"
 
 failures = 0
@@ -150,6 +151,62 @@ end
 failures = check("the six state colours differ",
                  colors.values.uniq.length == 6,
                  failures)
+
+# Panel commands: only four fixed texts reach the guest.
+expected = { "flood-on" => "flood on", "flood-off" => "flood off",
+             "mute" => "mute", "restore" => "restore" }
+expected.each do |name, text|
+  failures = check("panel command #{name} writes #{text}",
+                   PanelControl.command_for(name) == text, failures)
+end
+["stop", "flood on", "", "flood-on; reboot", nil].each do |name|
+  failures = check("panel command #{name.inspect} is refused",
+                   PanelControl.command_for(name).nil?, failures)
+end
+argv = PanelControl.ssh_argv("flood on")
+failures = check("panel ssh uses port 2222 in batch mode",
+                 argv[0] == "ssh" && argv[1, 2] == ["-p", "2222"] &&
+                 argv.include?("BatchMode=yes") && argv.include?("root@localhost"),
+                 failures)
+failures = check("panel ssh writes the device",
+                 argv.last == "echo 'flood on' > /dev/signal-source", failures)
+
+seen = []
+ok_runner = lambda { |a| seen << a; [0, "", ""] }
+result = PanelControl.send_command("mute", ok_runner)
+failures = check("a sent command reports success", result[:ok] && result[:command] == "mute", failures)
+failures = check("a sent command runs ssh once", seen.length == 1, failures)
+seen.clear
+result = PanelControl.send_command("stop", ok_runner)
+failures = check("stop never runs ssh", !result[:ok] && seen.empty?, failures)
+down = lambda { |_a| [255, "", "ssh: connect to host localhost port 2222: Connection refused\n"] }
+result = PanelControl.send_command("flood-on", down)
+failures = check("an unreachable guest is a failure", !result[:ok], failures)
+failures = check("the ssh error is shown",
+                 PanelControl.result_text(result).include?("Connection refused"), failures)
+hung = lambda { |_a| [nil, "", ""] }
+result = PanelControl.send_command("flood-off", hung)
+failures = check("a hung ssh is a failure with a reason",
+                 !result[:ok] && result[:error].include?("did not finish"), failures)
+rejected = lambda { |_a| [1, "", "/dev/signal-source: Invalid argument\n"] }
+result = PanelControl.send_command("flood-on", rejected)
+failures = check("a refused device write is a failure",
+                 !result[:ok] && PanelControl.result_text(result).include?("Invalid argument"),
+                 failures)
+
+host = "127.0.0.1:8765"
+failures = check("the page may send a command",
+                 PanelControl.request_allowed?("POST", host, "http://#{host}", "1", host), failures)
+failures = check("a command without Origin is allowed from the page",
+                 PanelControl.request_allowed?("POST", host, nil, "1", host), failures)
+failures = check("GET cannot send a command",
+                 !PanelControl.request_allowed?("GET", host, nil, "1", host), failures)
+failures = check("a command without the header is refused",
+                 !PanelControl.request_allowed?("POST", host, nil, nil, host), failures)
+failures = check("another origin is refused",
+                 !PanelControl.request_allowed?("POST", host, "http://example.com", "1", host), failures)
+failures = check("another Host is refused",
+                 !PanelControl.request_allowed?("POST", "evil.test:8765", nil, "1", host), failures)
 
 if failures == 0
   puts "all tests passed"

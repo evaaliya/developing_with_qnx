@@ -348,6 +348,10 @@ module PanelView
             padding: 12px 18px; border-radius: 8px; margin: 8px 0; }
   .bad { background: #7f1d1d; }
   .age, .mode, .detail { margin: 6px 0; }
+  .controls { margin: 16px 0; }
+  .controls button { font: inherit; padding: 6px 12px; margin: 0 6px 6px 0; border-radius: 6px;
+                     border: 1px solid #475569; background: #fff; cursor: pointer; }
+  .command-failed { color: #b91c1c; font-weight: 700; }
   .legend { margin: 8px 0 16px; }
   .swatch { display: inline-block; color: #fff; margin: 0 6px 6px 0; padding: 4px 8px;
             border-radius: 4px; font-size: 12px; }
