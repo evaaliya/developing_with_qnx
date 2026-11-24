@@ -13,6 +13,22 @@ set -eu
 
 LATE=/tmp/qnx-late-check.sh
 
+# Waits until a node has registered its name, as the supervisor does
+# before it starts the next node. Without this the burst could reach
+# relay B before the sink was up, and every signal of the run waited
+# about 30 ms in relay B (B24, D-066).
+wait_name() {
+    w=0
+    while [ ! -e "/dev/name/local/$1" ]; do
+        w=$((w + 1))
+        if [ "$w" -gt 500 ]; then
+            echo "scenario: $1 did not register its name within 5 s" >&2
+            return 1
+        fi
+        sleep 0.01
+    done
+}
+
 # Prints the same sections make run used to print from the ssh command.
 # set -e is off around source and the waits: a non-zero source still has
 # to show its log before the script exits with that status.
@@ -38,14 +54,17 @@ run_chain() {
         /tmp/sink "$total" > /tmp/sink.out 2>&1 &
     fi
     sink_pid=$!
+    wait_name signal-sink || exit 1
     /tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
     relay_b=$!
+    wait_name signal-relay-b || exit 1
     if [ "$mode" = "flood" ]; then
         /tmp/relay signal-relay-a signal-relay-b -q "$queue" > /tmp/relay-a.out 2>&1 &
     else
         /tmp/relay signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 &
     fi
     relay_a=$!
+    wait_name signal-relay-a || exit 1
 
     set +e
     if [ -n "$seed" ]; then
