@@ -11,16 +11,17 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/sink \
     src/sink/sink.c src/common/signal_msg.c src/common/net_state.c \
     src/common/signal_ledger.c src/common/issued_log.c \
     src/common/telemetry_snap.c src/common/telemetry_pub.c \
-    src/common/latency_stats.c -lsocket
+    src/common/latency_stats.c src/common/node_store.c -lsocket
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/source \
     src/source/source.c src/common/signal_msg.c src/common/issue_order.c \
     src/common/issued_log.c src/common/source_ctl.c \
     src/common/net_state.c src/common/telemetry_snap.c \
     src/common/telemetry_pub.c src/common/latency_stats.c \
-    src/common/close_list.c -lsocket
+    src/common/close_list.c src/common/live_book.c src/common/node_store.c \
+    -lsocket
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/relay \
     src/relay/relay.c src/common/signal_msg.c src/common/signal_queue.c \
-    src/common/close_list.c
+    src/common/close_list.c src/common/drop_book.c src/common/node_store.c
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/supervisor \
     src/supervisor/supervisor.c src/common/restart_limit.c \
     src/common/node_fault.c src/common/issued_log.c \

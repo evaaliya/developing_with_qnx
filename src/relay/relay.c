@@ -1,6 +1,8 @@
 #define _QNX_SOURCE
 
 #include "close_list.h"
+#include "drop_book.h"
+#include "node_store.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
@@ -51,10 +53,12 @@ struct relay {
     rcvid_t manifest_rcvid;
     struct signal_manifest manifest;
     size_t capacity;
-    /* Numbers this relay dropped that no close or manifest has carried yet. */
+    /*
+     * Numbers this relay dropped that no close or manifest has carried
+     * yet. Shared memory, so a restarted relay keeps them (D-063).
+     */
     pthread_mutex_t drop_lock;
-    uint64_t dropped[SIGNAL_MANIFEST_CAP];
-    unsigned dropped_count;
+    struct drop_book *drops;
     /* One close at a time, passed on by the close thread (D-062). */
     pthread_t closer;
     pthread_cond_t close_ready;
@@ -223,7 +227,7 @@ static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
         fflush(stdout);
     }
     pthread_mutex_lock(&node->drop_lock);
-    if (node->dropped_count >= SIGNAL_MANIFEST_CAP) {
+    if (drop_book_add(node->drops, number) != 0) {
         pthread_mutex_unlock(&node->drop_lock);
         fprintf(stderr,
                 "relay %s: the dropped list is full, signal %" PRIu64
@@ -231,7 +235,6 @@ static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
                 node->own_name, number);
         return;
     }
-    node->dropped[node->dropped_count++] = number;
     pthread_mutex_unlock(&node->drop_lock);
 }
 
@@ -247,8 +250,8 @@ static void mark_dropped(struct relay *node, struct signal_manifest *manifest)
     for (i = 0; i < count; i++) {
         unsigned d;
 
-        for (d = 0; d < node->dropped_count; d++) {
-            if (manifest->item[i].number != node->dropped[d]) {
+        for (d = 0; d < node->drops->count; d++) {
+            if (manifest->item[i].number != node->drops->number[d]) {
                 continue;
             }
             manifest->item[i].reserved = SIGNAL_MANIFEST_DROPPED;
@@ -379,8 +382,8 @@ static void *close_main(void *arg)
         n = close.count;
 
         pthread_mutex_lock(&node->drop_lock);
-        marked = close_mark_dropped(close.item, n, node->dropped,
-                                    node->dropped_count);
+        marked = close_mark_dropped(close.item, n, node->drops->number,
+                                    node->drops->count);
         pthread_mutex_unlock(&node->drop_lock);
         if (marked < 0) {
             fprintf(stderr, "relay %s: a close is not in number order\n",
@@ -398,9 +401,8 @@ static void *close_main(void *arg)
         }
         if (sent == EOK) {
             pthread_mutex_lock(&node->drop_lock);
-            node->dropped_count = close_forget_dropped(
-                node->dropped, node->dropped_count, close.item[0].number,
-                close.item[n - 1].number);
+            drop_book_forget(node->drops, close.item[0].number,
+                             close.item[n - 1].number);
             pthread_mutex_unlock(&node->drop_lock);
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
                 fprintf(stderr, "relay %s: replying to a close failed: %s\n",
@@ -833,7 +835,7 @@ static int parse_u(const char *text, unsigned long *out)
 }
 
 static int parse_relay_args(int argc, char **argv, const char **own,
-                            const char **next, size_t *capacity)
+                            const char **next, size_t *capacity, int *resume)
 {
     const char *names[2];
     int name_count = 0;
@@ -841,11 +843,16 @@ static int parse_relay_args(int argc, char **argv, const char **own,
     unsigned long value = SIGNAL_QUEUE_CAP;
     int i;
 
+    *resume = 0;
     for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-r") == 0) {
+            *resume = 1;
+            continue;
+        }
         if (strcmp(argv[i], "-q") == 0) {
             if (got_q || i + 1 >= argc) {
                 fprintf(stderr,
-                        "usage: relay <attach-name> <next-name> [-q N]\n");
+                        "usage: relay <attach-name> <next-name> [-q N] [-r]\n");
                 return -1;
             }
             i++;
@@ -859,19 +866,62 @@ static int parse_relay_args(int argc, char **argv, const char **own,
             continue;
         }
         if (name_count >= 2 || !name_ok(argv[i])) {
-            fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N]\n");
+            fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N] [-r]\n");
             return -1;
         }
         names[name_count++] = argv[i];
     }
     if (name_count != 2) {
-        fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N]\n");
+        fprintf(stderr, "usage: relay <attach-name> <next-name> [-q N] [-r]\n");
         return -1;
     }
     *own = names[0];
     *next = names[1];
     *capacity = (size_t)value;
     return 0;
+}
+
+/*
+ * The drop list in shared memory (D-063). Without -r a new list. With
+ * -r the dead relay's list, or a line saying it is gone. If shared
+ * memory fails, the list lives in this process only, and that is said.
+ */
+static struct drop_book *open_drops(const char *own_name, int resume)
+{
+    static struct drop_book local;
+    char store[NAME_LIMIT + 16];
+    enum node_store_found found = NODE_STORE_NEW;
+    struct drop_book *book = NULL;
+
+    if (drop_book_store_name(own_name, store, sizeof store) == 0) {
+        book = node_store_map(store, sizeof *book, resume, &found);
+        if (book == NULL) {
+            fprintf(stderr, "relay %s: shared memory %s failed: %s; the drop "
+                    "list will not outlive this process\n",
+                    own_name, store, strerror(errno));
+        }
+    }
+    if (book == NULL) {
+        book = &local;
+        found = resume ? NODE_STORE_MISSING : NODE_STORE_NEW;
+    }
+    if (found == NODE_STORE_KEPT && drop_book_resume(book) == 0) {
+        printf("relay %s: resumed the books of a dead relay (resume %u): %u "
+               "dropped numbers kept; its queue is lost and source closes "
+               "those numbers as lost\n",
+               own_name, (unsigned)book->resumes, (unsigned)book->count);
+        fflush(stdout);
+        return book;
+    }
+    drop_book_init(book);
+    if (resume) {
+        printf("relay %s: books reset after a restart (%s); numbers the dead "
+               "relay dropped will be counted lost\n", own_name,
+               found == NODE_STORE_KEPT ? "saved books were not whole"
+                                        : node_store_found_text(found));
+        fflush(stdout);
+    }
+    return book;
 }
 
 int main(int argc, char **argv)
@@ -892,8 +942,10 @@ int main(int argc, char **argv)
     const char *own_name;
     const char *next_name;
     size_t capacity;
+    int resume;
 
-    if (parse_relay_args(argc, argv, &own_name, &next_name, &capacity) != 0) {
+    if (parse_relay_args(argc, argv, &own_name, &next_name, &capacity,
+                         &resume) != 0) {
         return EXIT_FAILURE;
     }
 
@@ -908,6 +960,7 @@ int main(int argc, char **argv)
     pthread_mutex_init(&node.drop_lock, NULL);
     pthread_cond_init(&node.close_ready, NULL);
     node.next_order = 1;
+    node.drops = open_drops(own_name, resume);
 
     if (pin_cpu0(node.own_name) != 0) {
         return EXIT_FAILURE;

@@ -2,6 +2,7 @@
 
 #include "issued_log.h"
 #include "net_state.h"
+#include "node_store.h"
 #include "signal_ledger.h"
 #include "signal_msg.h"
 #include "telemetry_pub.h"
@@ -31,6 +32,8 @@ _Static_assert(SIGNAL_MANIFEST_CAP == SIGNAL_LEDGER_CAP,
 
 static const struct signal_ledger *pub_ledger;
 static enum net_state current_state = NET_INIT;
+/* 1 when a restarted sink found no books to go on from (D-063). */
+static int books_reset;
 static struct telem_window hop_window[3];
 static int telemetry_on;
 
@@ -261,66 +264,53 @@ static void print_summary(const struct signal_ledger *ledger)
     publish_sink(ledger, current_state, 1);
 }
 
-static void print_lost(uint64_t number, uint32_t class_id)
+/*
+ * One line per lost number, flushed once per close by the caller. A
+ * flush per line held the only sink thread for 111-128 ms on a close
+ * with ~900 losses after a restart, and URGENT waited (D-063).
+ */
+static void print_lost(uint64_t number, uint32_t class_id, void *arg)
 {
+    (void)arg;
     printf("sink: lost signal %" PRIu64 " class %s\n",
            number, signal_class_name(class_id));
-    fflush(stdout);
 }
 
 /*
- * Puts a list of issued numbers on the books: issue each, record the
- * drops a relay marked, and count every number that neither arrived
- * nor was dropped as lost. The manifest and each close use it (D-062).
- * 0, or -1 with a message when the ledger refused a number.
+ * Puts a list of issued numbers on the books (D-062). A repeated close
+ * keeps the accounts it already gave (D-063). 0, or -1 with a message
+ * when the ledger refused a number.
  */
 static int close_items(struct signal_ledger *ledger,
                        const struct signal_manifest_item *items, unsigned n,
                        const char *what, unsigned *lost_out,
                        unsigned *dropped_out)
 {
-    unsigned item;
-    unsigned lost = 0;
-    unsigned dropped = 0;
+    struct signal_ledger_close_result res;
+    int rc = signal_ledger_close(ledger, items, n, print_lost, NULL, &res);
 
-    for (item = 0; item < n; item++) {
-        if (signal_ledger_issue(ledger, items[item].number,
-                                items[item].class_id) != 0) {
-            fprintf(stderr,
-                    "sink: the %s repeats signal %" PRIu64 ", or its ledger "
-                    "slot still holds a number that is not closed\n",
-                    what, items[item].number);
-            return -1;
-        }
+    fflush(stdout);
+    if (rc != 0) {
+        fprintf(stderr,
+                "sink: the %s repeats signal %" PRIu64 ", or its ledger "
+                "slot still holds a number that is not closed\n",
+                what, res.refused);
+        return -1;
     }
-    for (item = 0; item < n; item++) {
-        if (items[item].reserved != SIGNAL_MANIFEST_DROPPED) {
-            continue;
-        }
-        if (signal_ledger_drop(ledger, items[item].number) != 0) {
-            fprintf(stderr,
-                    "sink: could not record dropped signal %" PRIu64 "\n",
-                    items[item].number);
-            return -1;
-        }
-        dropped++;
+    if (res.repeated > 0) {
+        printf("sink: the %s repeats %u numbers already on the books; "
+               "they keep their account\n", what, res.repeated);
     }
-    for (item = 0; item < n; item++) {
-        if (!signal_ledger_is_open(ledger, items[item].number)) {
-            continue;
-        }
-        if (signal_ledger_lose(ledger, items[item].number,
-                               items[item].class_id) != 0) {
-            return -1;
-        }
-        print_lost(items[item].number, items[item].class_id);
-        lost++;
+    if (res.drop_refused > 0) {
+        printf("sink: the %s marks %u numbers dropped that arrived or are "
+               "URGENT; they keep their account\n", what, res.drop_refused);
     }
+    fflush(stdout);
     if (lost_out != NULL) {
-        *lost_out = lost;
+        *lost_out = res.lost;
     }
     if (dropped_out != NULL) {
-        *dropped_out = dropped;
+        *dropped_out = res.dropped;
     }
     return 0;
 }
@@ -340,10 +330,76 @@ static int arm_receive(uint64_t gap_ns)
     return 0;
 }
 
+static void print_resumed(const struct signal_ledger *ledger)
+{
+    static const uint32_t classes[] = {
+        SIGNAL_CLASS_URGENT, SIGNAL_CLASS_COMMAND, SIGNAL_CLASS_BACKGROUND
+    };
+    size_t i;
+
+    printf("sink: resumed the books of a dead sink (resume %u)\n",
+           (unsigned)ledger->resumes);
+    for (i = 0; i < sizeof classes / sizeof classes[0]; i++) {
+        unsigned on_time;
+        unsigned late;
+        unsigned lost;
+        unsigned dropped;
+
+        class_counts(ledger, classes[i], &on_time, &late, &lost, &dropped);
+        printf("sink: books kept %s on time %u, late %u, lost %u, dropped %u\n",
+               signal_class_name(classes[i]), on_time, late, lost, dropped);
+    }
+    printf("sink: the network state and the latency window start again; "
+           "a signal answered in the instant before the kill may be counted "
+           "lost\n");
+    fflush(stdout);
+}
+
+/*
+ * The ledger lives in shared memory so a restarted sink goes on from
+ * the dead one's totals (D-063). A sink started without -r begins new
+ * books. If shared memory fails, the run goes on with books in this
+ * process only, and that is said.
+ */
+static struct signal_ledger *open_books(int resume)
+{
+    static struct signal_ledger local;
+    struct signal_ledger_resume r;
+    enum node_store_found found = NODE_STORE_NEW;
+    struct signal_ledger *ledger;
+
+    ledger = node_store_map(SIGNAL_LEDGER_STORE, sizeof *ledger, resume,
+                            &found);
+    if (ledger == NULL) {
+        fprintf(stderr, "sink: shared memory %s failed: %s; the books will "
+                "not outlive this process\n", SIGNAL_LEDGER_STORE,
+                strerror(errno));
+        ledger = &local;
+        found = resume ? NODE_STORE_MISSING : NODE_STORE_NEW;
+    }
+    if (found == NODE_STORE_KEPT && signal_ledger_resume(ledger, &r) == 0) {
+        if (r.journal_redone) {
+            printf("sink: finished a slot hand-over the dead sink began\n");
+        }
+        print_resumed(ledger);
+        return ledger;
+    }
+    signal_ledger_init(ledger);
+    if (resume) {
+        books_reset = 1;
+        printf("sink: books reset after a restart (%s); totals before this "
+               "restart are not included\n",
+               found == NODE_STORE_KEPT ? "saved books were not whole"
+                                        : node_store_found_text(found));
+        fflush(stdout);
+    }
+    return ledger;
+}
+
 int main(int argc, char **argv)
 {
     name_attach_t *attach;
-    static struct signal_ledger ledger;
+    struct signal_ledger *ledger;
     struct net_machine machine;
     static struct receive_buffer buffer;
     enum net_state shown = NET_LOCKED_SAFE;
@@ -355,19 +411,25 @@ int main(int argc, char **argv)
     /* Default pin is the D-049 result: free runs stalled, pinned runs did not. */
     int pin = 1;
     int arg0 = 1;
+    int resume = 0;
 
-    if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
-        if (strcmp(argv[2], "0") != 0) {
-            fprintf(stderr, "usage: sink [-c 0] <signal-count> [urgent-gap-ms]\n");
+    while (arg0 < argc && argv[arg0][0] == '-') {
+        if (strcmp(argv[arg0], "-c") == 0 && arg0 + 1 < argc &&
+            strcmp(argv[arg0 + 1], "0") == 0) {
+            pin = 1;
+            arg0 += 2;
+        } else if (strcmp(argv[arg0], "-r") == 0) {
+            resume = 1;
+            arg0++;
+        } else {
+            fprintf(stderr, "usage: sink [-c 0] [-r] <signal-count> [urgent-gap-ms]\n");
             return EXIT_FAILURE;
         }
-        pin = 1;
-        arg0 = 3;
     }
     if ((argc - arg0 != 1 && argc - arg0 != 2) ||
         parse_count(argv[arg0], &expected, 0) != 0 ||
         (argc - arg0 == 2 && parse_count(argv[arg0 + 1], &gap_ms, 0) != 0)) {
-        fprintf(stderr, "usage: sink [-c 0] <signal-count> [urgent-gap-ms]\n");
+        fprintf(stderr, "usage: sink [-c 0] [-r] <signal-count> [urgent-gap-ms]\n");
         return EXIT_FAILURE;
     }
     if (expected > SIGNAL_LEDGER_CAP) {
@@ -380,6 +442,10 @@ int main(int argc, char **argv)
      * manifest, so they do not have to show up as messages.
      */
 
+    /* Lost lines are flushed once per close (D-063). */
+    if (setvbuf(stdout, NULL, _IOFBF, 65536) != 0) {
+        fprintf(stderr, "sink: could not size the output buffer\n");
+    }
     if (install_alarm() == -1) {
         return EXIT_FAILURE;
     }
@@ -387,7 +453,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    signal_ledger_init(&ledger);
+    ledger = open_books(resume);
     gap_ns = (int64_t)gap_ms * 1000000LL;
     net_machine_init(&machine, monotonic_ns(), gap_ns, NET_RECOVER_URGENT_NEED);
     {
@@ -399,7 +465,7 @@ int main(int argc, char **argv)
     }
     if (telem_pub_open("sink")) {
         telemetry_on = 1;
-        pub_ledger = &ledger;
+        pub_ledger = ledger;
     }
     show_state(&shown, machine.state);
 
@@ -423,7 +489,7 @@ int main(int argc, char **argv)
             show_state(&shown, net_machine_on_tick(&machine, now_ns));
         }
         if (arm_receive((uint64_t)gap_ns) != 0) {
-            print_summary(&ledger);
+            print_summary(ledger);
             detach(attach);
             return EXIT_FAILURE;
         }
@@ -443,7 +509,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "sink: waiting for a signal failed: %s\n",
                         strerror(errno));
             }
-            print_summary(&ledger);
+            print_summary(ledger);
             detach(attach);
             return EXIT_FAILURE;
         }
@@ -469,7 +535,7 @@ int main(int argc, char **argv)
         if (info.msglen < (ssize_t)sizeof(uint16_t) ||
             buffer.body.message.type <= _IO_MAX) {
             if (reject(rcvid, ENOSYS, "rejecting a system message failed") == -1) {
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -481,7 +547,7 @@ int main(int argc, char **argv)
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
                 fprintf(stderr, "sink: replying to a drop notice failed: %s\n",
                         strerror(errno));
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -498,7 +564,7 @@ int main(int argc, char **argv)
                 printf("sink: manifest did not arrive; this summary is only "
                        "signals sink saw\n");
             }
-            print_summary(&ledger);
+            print_summary(ledger);
             fflush(stdout);
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
                 fprintf(stderr, "sink: replying to the lock failed: %s\n",
@@ -520,24 +586,24 @@ int main(int argc, char **argv)
 
             if (n == 0 || n > SIGNAL_CLOSE_CAP) {
                 if (reject(rcvid, EINVAL, "rejecting a close failed") == -1) {
-                    print_summary(&ledger);
+                    print_summary(ledger);
                     detach(attach);
                     return EXIT_FAILURE;
                 }
                 continue;
             }
             close_start = monotonic_ns();
-            if (close_items(&ledger, buffer.body.close.item, n, "close", &lost,
+            if (close_items(ledger, buffer.body.close.item, n, "close", &lost,
                             &dropped) != 0) {
                 (void)reject(rcvid, EINVAL, "rejecting a close failed");
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
                 fprintf(stderr, "sink: replying to a close failed: %s\n",
                         strerror(errno));
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -547,7 +613,7 @@ int main(int argc, char **argv)
                    ", lost %u, dropped %u, open %u, took %lld ns\n",
                    n, buffer.body.close.item[0].number,
                    buffer.body.close.item[n - 1].number, lost, dropped,
-                   signal_ledger_unaccounted(&ledger),
+                   signal_ledger_unaccounted(ledger),
                    (long long)(monotonic_ns() - close_start));
             fflush(stdout);
             show_state(&shown, machine.state);
@@ -560,7 +626,7 @@ int main(int argc, char **argv)
 
             if (buffer.body.manifest.count > SIGNAL_MANIFEST_CAP) {
                 if (reject(rcvid, EINVAL, "rejecting the manifest failed") == -1) {
-                    print_summary(&ledger);
+                    print_summary(ledger);
                     detach(attach);
                     return EXIT_FAILURE;
                 }
@@ -569,14 +635,14 @@ int main(int argc, char **argv)
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
                 fprintf(stderr, "sink: replying to the manifest failed: %s\n",
                         strerror(errno));
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
-            if (close_items(&ledger, buffer.body.manifest.item,
+            if (close_items(ledger, buffer.body.manifest.item,
                             buffer.body.manifest.count, "manifest", NULL,
                             &item) != 0) {
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -598,7 +664,7 @@ int main(int argc, char **argv)
                 fflush(stdout);
             }
             {
-                unsigned missed = signal_ledger_arrived_unissued(&ledger);
+                unsigned missed = signal_ledger_arrived_unissued(ledger);
 
                 if (missed > 0) {
                     printf("sink: issued list did not include %u arrivals\n",
@@ -606,9 +672,9 @@ int main(int argc, char **argv)
                     fflush(stdout);
                 }
             }
-            if (signal_ledger_unaccounted(&ledger) != 0) {
+            if (signal_ledger_unaccounted(ledger) != 0) {
                 fprintf(stderr, "sink: the manifest left a signal unaccounted\n");
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -625,7 +691,7 @@ int main(int argc, char **argv)
                     buffer.body.message.type, (long long)info.msglen,
                     buffer.body.message.body.hop_count);
             if (reject(rcvid, EINVAL, "rejecting that message failed") == -1) {
-                print_summary(&ledger);
+                print_summary(ledger);
                 detach(attach);
                 return EXIT_FAILURE;
             }
@@ -637,12 +703,12 @@ int main(int argc, char **argv)
         if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
             fprintf(stderr, "sink: replying to the sender failed: %s\n",
                     strerror(errno));
-            print_summary(&ledger);
+            print_summary(ledger);
             detach(attach);
             return EXIT_FAILURE;
         }
 
-        if (signal_ledger_receive(&ledger, buffer.body.message.body.number,
+        if (signal_ledger_receive(ledger, buffer.body.message.body.number,
                                   buffer.body.message.body.class_id,
                                   verdict) != 0) {
             fprintf(stderr, "sink: signal %" PRIu64 " was already accounted\n",
@@ -674,7 +740,12 @@ int main(int argc, char **argv)
     }
 
     alarm(0);
-    print_summary(&ledger);
+    print_summary(ledger);
     detach(attach);
+    /* The run is over and a clean exit is not restarted: free the books. */
+    if (node_store_remove(SIGNAL_LEDGER_STORE) != 0) {
+        fprintf(stderr, "sink: removing %s failed: %s\n", SIGNAL_LEDGER_STORE,
+                strerror(errno));
+    }
     return EXIT_SUCCESS;
 }

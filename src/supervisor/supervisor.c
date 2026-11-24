@@ -178,33 +178,40 @@ static int start_node(enum role role, int restarted)
         snprintf(window_buf, sizeof window_buf, "%lu", window_ms);
         path = "/tmp/sink";
         argv[0] = path;
-        argv[1] = count_buf;
-        argv[2] = window_buf;
-        argv[3] = NULL;
+        /* -r: go on with the dead node's books (D-063). */
+        argv[1] = restarted ? "-r" : count_buf;
+        argv[2] = restarted ? count_buf : window_buf;
+        argv[3] = restarted ? window_buf : NULL;
+        argv[4] = NULL;
         break;
     case ROLE_RELAY_B:
         path = "/tmp/relay";
         argv[0] = path;
         argv[1] = "signal-relay-b";
         argv[2] = "signal-sink";
-        argv[3] = NULL;
+        argv[3] = restarted ? "-r" : NULL;
+        argv[4] = NULL;
         break;
     case ROLE_RELAY_A:
         path = "/tmp/relay";
         argv[0] = path;
         argv[1] = "signal-relay-a";
         argv[2] = "signal-relay-b";
-        argv[3] = NULL;
+        argv[3] = restarted ? "-r" : NULL;
+        argv[4] = NULL;
         break;
     case ROLE_SOURCE: {
         int n = 0;
 
         if (live_source) {
             path = "/tmp/source";
-            argv[0] = path;
-            argv[1] = "live";
-            argv[2] = "signal-relay-a";
-            argv[3] = NULL;
+            argv[n++] = path;
+            argv[n++] = "live";
+            if (restarted) {
+                argv[n++] = "-r";
+            }
+            argv[n++] = "signal-relay-a";
+            argv[n] = NULL;
             break;
         }
         snprintf(urgent_buf, sizeof urgent_buf, "%lu", urgent_count);

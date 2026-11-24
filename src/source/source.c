@@ -3,6 +3,8 @@
 #include "close_list.h"
 #include "issue_order.h"
 #include "issued_log.h"
+#include "live_book.h"
+#include "node_store.h"
 #include "signal_msg.h"
 #include "signal_queue.h"
 #include "signal_sched.h"
@@ -310,8 +312,23 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
     }
     sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
     if (sent == -1) {
+        int err = errno;
+
+        /*
+         * The next node died (ESRCH) or its connection is gone (EBADF).
+         * The live source keeps the number on its book and waits for the
+         * node to come back (D-063). The counted burst stops.
+         */
+        if (err == ESRCH || err == EBADF) {
+            if (!g_ctl.live) {
+                fprintf(stderr, "source: sending signal %" PRIu64
+                        " failed: %s\n", number, strerror(err));
+            }
+            errno = err;
+            return 1;
+        }
         fprintf(stderr, "source: sending signal %" PRIu64 " failed: %s\n",
-                number, strerror(errno));
+                number, strerror(err));
         return -1;
     }
     if (sent != EOK) {
@@ -556,44 +573,135 @@ static int usage(void)
     fprintf(stderr,
             "usage: source [-s seed] [-n start] <urgent-count> "
             "<command-count> <background-count> <next-name> [gap-ms]\n"
-            "       source live <next-name>\n");
+            "       source live [-r] <next-name>\n");
     return EXIT_FAILURE;
 }
 
-struct live_book {
+/* Everything under g_issue_lock. */
+struct live_state {
     int coid;
-    struct issued_ring *ring;
-    uint64_t *number;
+    const char *next_name;
+    struct live_book *book;
     int failed;
     int stop;
+    /* The next node is gone; nothing is issued until it is back (D-063). */
+    int link_down;
+    int64_t down_since_ns;
+    unsigned long not_issued;
+    unsigned long flood_skipped;
 };
 
-static struct live_book g_live;
+static struct live_state g_live;
+static unsigned g_books_resumes;
+static int g_books_reset;
+
+static int link_gone(int err)
+{
+    return err == ESRCH || err == EBADF;
+}
 
 /*
- * One live signal. 1 when sent, 0 when the issued ring is full (closes
- * have stopped coming back), -1 when the send failed.
+ * The caller holds g_issue_lock. Only the first thread to see the dead
+ * connection marks it; a send on a connection already replaced is not
+ * a new death.
+ */
+static void mark_link_down_locked(int coid_used, const char *what)
+{
+    if (g_live.link_down || coid_used != g_live.coid) {
+        return;
+    }
+    g_live.link_down = 1;
+    g_live.down_since_ns = monotonic_ns();
+    g_live.not_issued = 0;
+    g_live.flood_skipped = 0;
+    printf("source: %s is gone (%s); numbers on the book are closed as lost "
+           "if they did not arrive, and nothing is issued until it is back\n",
+           g_live.next_name, what);
+    fflush(stdout);
+}
+
+/* The timer thread, each tick while the next node is gone. */
+static void try_reopen(void)
+{
+    int down;
+    int coid;
+    int old;
+    int64_t since;
+    unsigned long skipped;
+    unsigned long flood;
+
+    pthread_mutex_lock(&g_issue_lock);
+    down = g_live.link_down;
+    pthread_mutex_unlock(&g_issue_lock);
+    if (!down) {
+        return;
+    }
+    coid = name_open(g_live.next_name, 0);
+    if (coid == -1) {
+        return;
+    }
+    pthread_mutex_lock(&g_issue_lock);
+    old = g_live.coid;
+    g_live.coid = coid;
+    g_live.link_down = 0;
+    since = g_live.down_since_ns;
+    skipped = g_live.not_issued;
+    flood = g_live.flood_skipped;
+    pthread_mutex_unlock(&g_issue_lock);
+    if (old >= 0 && name_close(old) == -1 && errno != EBADF) {
+        fprintf(stderr, "source: closing the dead connection failed: %s\n",
+                strerror(errno));
+    }
+    printf("source: reopened %s after %lld ms; %lu scheduled signals and %lu "
+           "flood batches were not issued while it was gone\n",
+           g_live.next_name, (long long)((monotonic_ns() - since) / 1000000LL),
+           skipped, flood);
+    fflush(stdout);
+}
+
+/*
+ * One live signal. 1 when sent, 2 when the next node is gone (the
+ * number stays on the book if it was taken), 0 when the book is full
+ * (closes have stopped coming back), -1 when the send failed. The
+ * number goes on the book before the send, so a death in the send
+ * leaves it to be closed (D-063).
  */
 static int issue_live(uint32_t class_id)
 {
     uint64_t number;
+    int coid;
+    int rc;
 
     pthread_mutex_lock(&g_issue_lock);
-    if (issued_ring_count(g_live.ring) >= SIGNAL_MANIFEST_CAP) {
+    if (g_live.link_down) {
+        g_live.not_issued++;
+        pthread_mutex_unlock(&g_issue_lock);
+        return 2;
+    }
+    if (issued_ring_count(&g_live.book->ring) >= SIGNAL_MANIFEST_CAP ||
+        live_book_take(g_live.book, class_id, monotonic_ns(), &number) != 0) {
         pthread_mutex_unlock(&g_issue_lock);
         return 0;
     }
-    number = *g_live.number;
-    if (send_one(g_live.coid, number, class_id) != 0) {
-        pthread_mutex_unlock(&g_issue_lock);
-        return -1;
-    }
-    (void)issued_ring_push(g_live.ring, number, class_id, monotonic_ns());
-    (*g_live.number)++;
     ctl_lock();
     source_ctl_note_issued(&g_ctl, class_id);
     ctl_unlock();
+    coid = g_live.coid;
+    rc = send_one(coid, number, class_id);
+    if (rc == 1) {
+        char what[96];
+
+        snprintf(what, sizeof what, "signal %" PRIu64 ": %s", number,
+                 strerror(errno));
+        mark_link_down_locked(coid, what);
+        pthread_mutex_unlock(&g_issue_lock);
+        publish_source(0);
+        return 2;
+    }
     pthread_mutex_unlock(&g_issue_lock);
+    if (rc != 0) {
+        return -1;
+    }
     publish_source(0);
     return 1;
 }
@@ -610,6 +718,7 @@ static int send_flood_batch(unsigned count)
     long sent;
     int64_t now;
     int64_t deadline;
+    int coid;
 
     if (count == 0 || count > SIGNAL_BATCH_MAX) {
         return -1;
@@ -630,15 +739,20 @@ static int send_flood_batch(unsigned count)
         pthread_mutex_unlock(&g_issue_lock);
         return 0;
     }
+    if (g_live.link_down) {
+        g_live.flood_skipped++;
+        pthread_mutex_unlock(&g_issue_lock);
+        return 0;
+    }
     /*
      * The flood may fill the ring of numbers not closed yet only up to
      * the reserve. Closes empty it every 250 ms, so this is reached only
      * when closes stop coming back (D-062).
      */
-    room = source_flood_room(issued_ring_count(g_live.ring),
+    room = source_flood_room(issued_ring_count(&g_live.book->ring),
                              SIGNAL_MANIFEST_CAP, count);
     if (room == 0) {
-        unsigned waiting = issued_ring_count(g_live.ring);
+        unsigned waiting = issued_ring_count(&g_live.book->ring);
 
         pthread_mutex_unlock(&g_issue_lock);
         ctl_lock();
@@ -656,18 +770,19 @@ static int send_flood_batch(unsigned count)
     }
     count = room;
     for (i = 0; i < count; i++) {
-        if (issued_ring_push(g_live.ring, *g_live.number,
-                             SIGNAL_CLASS_BACKGROUND, now) != 0) {
+        uint64_t number;
+
+        if (live_book_take(g_live.book, SIGNAL_CLASS_BACKGROUND, now,
+                           &number) != 0) {
             break;
         }
-        batch.body[sent_n].number = *g_live.number;
+        batch.body[sent_n].number = number;
         batch.body[sent_n].class_id = SIGNAL_CLASS_BACKGROUND;
         batch.body[sent_n].issued_ns = now;
         batch.body[sent_n].deadline_ns = deadline;
         ctl_lock();
         source_ctl_note_issued(&g_ctl, SIGNAL_CLASS_BACKGROUND);
         ctl_unlock();
-        (*g_live.number)++;
         sent_n++;
     }
     if (sent_n == 0) {
@@ -675,6 +790,7 @@ static int send_flood_batch(unsigned count)
         return 0;
     }
     batch.count = (uint16_t)sent_n;
+    coid = g_live.coid;
     /*
      * The numbers are on the issued list. Release the lock before the
      * send, so the URGENT timer thread never waits for a batch to be
@@ -687,7 +803,16 @@ static int send_flood_batch(unsigned count)
         pthread_mutex_unlock(&g_issue_lock);
         return -1;
     }
-    sent = MsgSend(g_live.coid, &batch, sizeof batch, NULL, 0);
+    sent = MsgSend(coid, &batch, sizeof batch, NULL, 0);
+    if (sent == -1 && link_gone(errno)) {
+        char what[96];
+
+        snprintf(what, sizeof what, "a BACKGROUND batch: %s", strerror(errno));
+        pthread_mutex_lock(&g_issue_lock);
+        mark_link_down_locked(coid, what);
+        pthread_mutex_unlock(&g_issue_lock);
+        return 0;
+    }
     if (sent == -1 || sent != EOK) {
         if (sent == -1 && errno == ETIMEDOUT) {
             fprintf(stderr, "source: the next node did not take a BACKGROUND "
@@ -836,13 +961,19 @@ static void *close_thread(void *arg)
         unsigned waiting;
         long sent;
         int stop;
+        int down;
+        int coid;
 
         nanosleep(&pause, NULL);
         pthread_mutex_lock(&g_issue_lock);
         stop = g_live.stop || g_live.failed;
-        n = stop ? 0 : issued_ring_closable(g_live.ring, monotonic_ns(),
-                                            CLOSE_SETTLE_NS, close.item,
-                                            SIGNAL_CLOSE_CAP);
+        down = g_live.link_down;
+        coid = g_live.coid;
+        n = (stop || down) ? 0
+                           : issued_ring_closable(&g_live.book->ring,
+                                                  monotonic_ns(),
+                                                  CLOSE_SETTLE_NS, close.item,
+                                                  SIGNAL_CLOSE_CAP);
         pthread_mutex_unlock(&g_issue_lock);
         if (stop) {
             break;
@@ -856,7 +987,16 @@ static void *close_thread(void *arg)
         if (arm_send_timeout(SEND_TIMEOUT_SECONDS) != 0) {
             continue;
         }
-        sent = MsgSend(g_live.coid, &close, sizeof close, NULL, 0);
+        sent = MsgSend(coid, &close, sizeof close, NULL, 0);
+        if (sent == -1 && link_gone(errno)) {
+            char what[96];
+
+            snprintf(what, sizeof what, "a close: %s", strerror(errno));
+            pthread_mutex_lock(&g_issue_lock);
+            mark_link_down_locked(coid, what);
+            pthread_mutex_unlock(&g_issue_lock);
+            continue;
+        }
         if (sent == -1 || sent != EOK) {
             if (!failing) {
                 fprintf(stderr, "source: closing signals %" PRIu64 "..%" PRIu64
@@ -868,8 +1008,8 @@ static void *close_thread(void *arg)
             continue;
         }
         pthread_mutex_lock(&g_issue_lock);
-        issued_ring_drop_front(g_live.ring, n);
-        waiting = issued_ring_count(g_live.ring);
+        live_book_close_front(g_live.book, n);
+        waiting = issued_ring_count(&g_live.book->ring);
         pthread_mutex_unlock(&g_issue_lock);
         if (failing) {
             printf("source: closes are coming back again\n");
@@ -883,15 +1023,67 @@ static void *close_thread(void *arg)
     return NULL;
 }
 
+/*
+ * The book in shared memory (D-063). Without -r new books. With -r the
+ * dead source's book, so numbers go on after its last one and its open
+ * numbers are closed. If there is no whole book, a line says the
+ * totals before the restart are gone. If shared memory fails, the book
+ * lives in this process only, and that is said.
+ */
+static struct live_book *open_book(int resume)
+{
+    static struct live_book local;
+    struct live_book_resume r;
+    enum node_store_found found = NODE_STORE_NEW;
+    struct live_book *book;
+
+    book = node_store_map(LIVE_BOOK_STORE, sizeof *book, resume, &found);
+    if (book == NULL) {
+        fprintf(stderr, "source: shared memory %s failed: %s; the book will "
+                "not outlive this process\n", LIVE_BOOK_STORE, strerror(errno));
+        book = &local;
+        found = resume ? NODE_STORE_MISSING : NODE_STORE_NEW;
+    }
+    if (found == NODE_STORE_KEPT && live_book_resume(book, &r) == 0) {
+        g_ctl.issued_urgent = r.issued[SIGNAL_CLASS_URGENT];
+        g_ctl.issued_command = r.issued[SIGNAL_CLASS_COMMAND];
+        g_ctl.issued_background = r.issued[SIGNAL_CLASS_BACKGROUND];
+        g_books_resumes = book->resumes;
+        printf("source: resumed the book of a dead source (resume %u): next "
+               "%" PRIu64 ", %u numbers wait to be closed, issued URGENT %"
+               PRIu64 " COMMAND %" PRIu64 " BACKGROUND %" PRIu64 "%s%s\n",
+               (unsigned)book->resumes, r.next, r.waiting,
+               r.issued[SIGNAL_CLASS_URGENT], r.issued[SIGNAL_CLASS_COMMAND],
+               r.issued[SIGNAL_CLASS_BACKGROUND],
+               r.journal_redone ? "; finished a close the dead source began" : "",
+               r.next_moved ? "; its last number was on the book but not sent "
+                              "for sure" : "");
+        printf("source: the mode of the dead source (flood or mute) is not "
+               "restored; mode is normal\n");
+        fflush(stdout);
+        return book;
+    }
+    live_book_init(book);
+    if (resume) {
+        g_books_reset = 1;
+        printf("source: books reset after a restart (%s); numbers start at 1 "
+               "again and totals before this restart are not included\n",
+               found == NODE_STORE_KEPT ? "saved book was not whole"
+                                        : node_store_found_text(found));
+        fflush(stdout);
+    }
+    return book;
+}
+
 static int run_live(int argc, char **argv)
 {
     static struct signal_manifest manifest;
-    static struct issued_ring ring;
+    struct live_book *book;
     struct sigevent event;
     struct itimerspec spec;
     int64_t next_ns[3];
     unsigned long recorded = 0;
-    uint64_t number = 1;
+    int resume = 0;
     int coid;
     int timer_chid;
     int timer_coid;
@@ -901,11 +1093,17 @@ static int run_live(int argc, char **argv)
     int failed = 0;
     const char *next_name;
 
-    if (argc != 3 || argv[2][0] == '\0') {
+    if (argc == 4 && strcmp(argv[2], "-r") == 0) {
+        resume = 1;
+    } else if (argc != 3) {
         return usage();
     }
-    next_name = argv[2];
+    next_name = argv[argc - 1];
+    if (next_name[0] == '\0') {
+        return usage();
+    }
     source_ctl_init(&g_ctl, 1);
+    book = open_book(resume);
     open_telemetry();
     if (pin_cpu0() != 0) {
         return EXIT_FAILURE;
@@ -990,9 +1188,8 @@ static int run_live(int argc, char **argv)
     next_ns[2] = 0;
     memset(&g_live, 0, sizeof g_live);
     g_live.coid = coid;
-    issued_ring_init(&ring);
-    g_live.ring = &ring;
-    g_live.number = &number;
+    g_live.next_name = next_name;
+    g_live.book = book;
     if (pthread_create(&g_flood_thread, NULL, flood_thread, NULL) != 0) {
         fprintf(stderr, "source: creating the flood thread failed: %s\n",
                 strerror(errno));
@@ -1050,6 +1247,7 @@ static int run_live(int argc, char **argv)
         if (pulse.code != _PULSE_CODE_MINAVAIL) {
             continue;
         }
+        try_reopen();
 
         ctl_lock();
         stop = g_ctl.stop;
@@ -1082,6 +1280,10 @@ static int run_live(int argc, char **argv)
                     if (issued < 0) {
                         failed = 1;
                         break;
+                    }
+                    if (issued == 2) {
+                        /* The next node is gone; the schedule moves on. */
+                        continue;
                     }
                     if (issued == 0) {
                         /* Closes stopped coming back; nothing can be issued. */
@@ -1131,17 +1333,30 @@ static int run_live(int argc, char **argv)
         failed = 1;
     }
     /* The manifest closes whatever the close thread had not closed yet. */
-    recorded = issued_ring_all(&ring, manifest.item, SIGNAL_MANIFEST_CAP);
+    recorded = issued_ring_all(&book->ring, manifest.item, SIGNAL_MANIFEST_CAP);
+    coid = g_live.coid;
+    if (g_live.link_down) {
+        fprintf(stderr, "source: %s is gone at the end; the manifest of %lu "
+                "signals cannot be sent and stays on the book\n",
+                next_name, recorded);
+        return EXIT_FAILURE;
+    }
     if (send_manifest(coid, &manifest, recorded) != 0) {
         name_close(coid);
         return EXIT_FAILURE;
+    }
+    /* sink has every number now and a clean exit is not restarted. */
+    live_book_close_front(book, recorded);
+    if (node_store_remove(LIVE_BOOK_STORE) != 0) {
+        fprintf(stderr, "source: removing %s failed: %s\n", LIVE_BOOK_STORE,
+                strerror(errno));
     }
     if (name_close(coid) == -1) {
         fprintf(stderr, "source: closing the connection to %s failed: %s\n",
                 next_name, strerror(errno));
         return EXIT_FAILURE;
     }
-    printf("source: sent %llu signals\n", (unsigned long long)(number - 1));
+    printf("source: sent %llu signals\n", (unsigned long long)(book->next - 1));
     ctl_lock();
     printf("source: issued URGENT %llu COMMAND %llu BACKGROUND %llu\n",
            (unsigned long long)g_ctl.issued_urgent,
