@@ -1,10 +1,14 @@
 #!/bin/sh
-# Runs on the QNX guest. Live source, flood on for at least 20 s.
-# The flood stops itself when it reaches its share of the issued list;
-# URGENT and COMMAND keep going and every signal is accounted (D-061).
+# Runs on the QNX guest. Live source, flood on for FLOOD_S seconds
+# (default 60). Closes keep the issued list short while the network runs,
+# so the flood holds until it is turned off, URGENT and COMMAND keep
+# going, and every signal is accounted (D-062).
 set -eu
 
-FLOOD_S=${1:-20}
+FLOOD_S=${1:-60}
+# No line per signal: a minute of flood would fill /tmp (D-062).
+SIGNAL_QUIET=1
+export SIGNAL_QUIET
 
 fail() {
     echo "long-flood: FAIL $1" >&2
@@ -64,12 +68,7 @@ echo "long-flood: held ${FLOOD_S} s, $start to $end"
 # Only small reads while the network runs: reading the large logs here
 # goes through the same /tmp server the nodes print to (B21).
 cat /dev/signal-source > /tmp/dev-status.txt
-if echo 'flood on' > /dev/signal-source 2>/dev/null; then
-    again=accepted
-else
-    again=refused
-fi
-cat /dev/signal-source > /tmp/dev-status-again.txt
+echo 'flood off' > /dev/signal-source
 echo 'stop' > /dev/signal-source
 i=0
 while [ "$i" -lt 100 ]; do
@@ -88,29 +87,31 @@ wait "$relay_b" >/dev/null 2>&1 || true
 set -e
 
 echo "long-flood: source exit $source_status, sink exit $sink_status"
-budget=$(grep 'flood budget used' /tmp/source.out || true)
-[ -n "$budget" ] || fail "the flood never reached its budget"
-echo "long-flood: $budget"
-echo "long-flood: status after the budget"
+echo "long-flood: status at the end of the flood"
 cat /tmp/dev-status.txt
-grep '^flood off$' /tmp/dev-status.txt >/dev/null || fail "flood is still on after the budget"
-echo "long-flood: flood on after the budget $again; $(grep '^error ' /tmp/dev-status-again.txt)"
-[ "$again" = refused ] || fail "flood on was accepted after the budget"
-grep '^error flood budget used$' /tmp/dev-status-again.txt >/dev/null ||
-    fail "status does not say the budget is used"
-# URGENT after the budget line: the schedule did not stop with the flood.
-after=$(awk '/flood budget used/ { seen = 1; next }
-             seen && /sent signal [0-9]* class URGENT/ { n++ }
-             END { print n + 0 }' /tmp/source.out)
-echo "long-flood: URGENT sent after the budget $after"
-[ "$after" -gt 0 ] || fail "no URGENT after the budget"
-if grep 'issued list is full' /tmp/source.out >/dev/null 2>&1; then
-    fail "the issued list filled"
+grep '^flood on$' /tmp/dev-status.txt >/dev/null || fail "the flood did not hold for ${FLOOD_S} s"
+if grep -E 'flood stopped|issued list is full' /tmp/source.out >/dev/null 2>&1; then
+    grep -E 'flood stopped|issued list is full' /tmp/source.out | head -3
+    fail "the issued list filled or the flood stopped itself"
 fi
-grep -c 'class BACKGROUND' /tmp/source.out | sed 's/^/long-flood: BACKGROUND sent lines /'
-grep 'flood batch' /tmp/source.out | wc -l | sed 's/^ */long-flood: flood batches /'
-grep 'sent manifest' /tmp/source.out || true
+closes=$(grep -c '^source: closed ' /tmp/source.out || true)
+echo "long-flood: closes $closes"
+[ "$closes" -gt 0 ] || fail "no close came back"
+grep '^source: closed ' /tmp/source.out | awk '{ w = $NF; if (w > max) max = w } END { print "long-flood: most numbers waiting to close " max + 0 }'
+grep '^source: sent manifest' /tmp/source.out | sed 's/^/long-flood: /'
+grep '^source: issued ' /tmp/source.out | sed 's/^/long-flood: /'
+df -k /tmp | tail -1 | sed 's/^/long-flood: guest \/tmp /'
+ls -l /tmp/source.out /tmp/relay-a.out /tmp/relay-b.out /tmp/sink.out | awk '{ print "long-flood: log " $NF " " $5 " bytes" }'
 grep -E '^sink: (summary|unaccounted)' /tmp/sink.out
+# Every issued signal is on the sink totals: received + lost + dropped.
+for c in URGENT COMMAND BACKGROUND; do
+    issued=$(awk -v c="$c" '$1 == "source:" && $2 == "issued" {
+        for (i = 3; i < NF; i += 2) if ($i == c) print $(i + 1) }' /tmp/source.out)
+    booked=$(awk -v c="$c" '$1 == "sink:" && $2 == "summary" && $3 == c {
+        gsub(",", ""); print $5 + $12 + $14 }' /tmp/sink.out)
+    echo "long-flood: $c issued $issued, on the sink totals ${booked:-none}"
+    [ "$issued" = "${booked:-x}" ] || fail "$c issued $issued but the sink totals hold ${booked:-none}"
+done
 grep -c 'sink: state DEGRADED' /tmp/sink.out | sed 's/^/long-flood: DEGRADED entries /'
 grep 'class URGENT late' /tmp/sink.out || true
 [ "$source_status" -eq 0 ] || fail "source exit $source_status"

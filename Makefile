@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-flood-hang panel-check measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-flood-hang panel-check measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -50,6 +50,8 @@ test: build/latency-report
 		tests/test_restart.c src/common/restart_limit.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-ledger \
 		tests/test_ledger.c src/common/signal_ledger.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-close-list \
+		tests/test_close_list.c src/common/close_list.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-latency-stats \
 		tests/test_latency_stats.c src/common/latency_stats.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-issue-order \
@@ -68,6 +70,7 @@ test: build/latency-report
 	./build/test-net-state
 	./build/test-restart
 	./build/test-ledger
+	./build/test-close-list
 	./build/test-latency-stats
 	./build/test-issue-order
 	./build/test-fault
@@ -120,7 +123,12 @@ run-dev: upload
 
 run-long-flood: upload
 	$(SCP) ./scripts/qnx-long-flood.sh root@localhost:/tmp/qnx-long-flood.sh
-	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-flood.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-flood.sh 20'
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-flood.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-flood.sh 60'
+
+run-long-live: upload
+	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
+	$(SCP) ./scripts/qnx-long-live.sh root@localhost:/tmp/qnx-long-live.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-live.sh /tmp/stall-probe /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-live.sh 600'
 
 run-flood-hang: upload
 	$(SCP) ./scripts/qnx-flood-hang.sh root@localhost:/tmp/qnx-flood-hang.sh
