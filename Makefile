@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-flood-hang panel-check measure stall-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -117,6 +117,17 @@ run-source: upload
 run-dev: upload
 	$(SCP) ./scripts/qnx-dev.sh root@localhost:/tmp/qnx-dev.sh
 	$(SSH) root@localhost 'chmod +x /tmp/qnx-dev.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-dev.sh'
+
+run-long-flood: upload
+	$(SCP) ./scripts/qnx-long-flood.sh root@localhost:/tmp/qnx-long-flood.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-long-flood.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-long-flood.sh 20'
+
+run-flood-hang: upload
+	$(SCP) ./scripts/qnx-flood-hang.sh root@localhost:/tmp/qnx-flood-hang.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-flood-hang.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-flood-hang.sh urgent && /tmp/qnx-flood-hang.sh mute'
+
+panel-check: upload
+	bash scripts/panel-check.sh
 
 scenarios: upload build/latency-report
 	bash scripts/run-scenarios.sh
