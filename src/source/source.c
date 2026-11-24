@@ -1263,7 +1263,15 @@ static int run_live(int argc, char **argv)
         if (failed) {
             break;
         }
-        if (set_fifo(SIGNAL_PRIO_OWN) != 0) {
+        /*
+         * Wait for the tick at URGENT priority, not at the own priority.
+         * A pulse raises only a thread already blocked in MsgReceive. At
+         * 10 this thread stayed READY on CPU 0 behind the BACKGROUND
+         * flood work at 12 for up to 3.5 s before it reached MsgReceive,
+         * and S2 issued 55-75 URGENT in its 5 s window instead of ~215
+         * (D-068). Blocked in MsgReceive it uses no CPU.
+         */
+        if (set_fifo(SIGNAL_PRIO_URGENT) != 0) {
             failed = 1;
             break;
         }
