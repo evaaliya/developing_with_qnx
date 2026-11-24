@@ -66,6 +66,10 @@ int source_ctl_apply(struct source_control *ctl, const char *text)
         return -1;
     }
     if (strcmp(cmd, "flood on") == 0) {
+        if (ctl->flood_spent) {
+            snprintf(ctl->error, sizeof ctl->error, "flood budget used");
+            return -1;
+        }
         ctl->flood = 1;
     } else if (strcmp(cmd, "flood off") == 0) {
         ctl->flood = 0;
@@ -203,4 +207,21 @@ unsigned source_flood_due(int flood, int64_t now_ns, int64_t *next_ns)
     }
     *next_ns = add_period(now_ns, SOURCE_FLOOD_PERIOD_NS);
     return SOURCE_FLOOD_BATCH;
+}
+
+unsigned source_flood_room(unsigned long recorded, unsigned long cap,
+                           unsigned want)
+{
+    unsigned long limit;
+    unsigned long room;
+
+    if (cap <= SOURCE_FLOOD_RESERVE) {
+        return 0;
+    }
+    limit = cap - SOURCE_FLOOD_RESERVE;
+    if (recorded >= limit) {
+        return 0;
+    }
+    room = limit - recorded;
+    return room < want ? (unsigned)room : want;
 }

@@ -261,6 +261,41 @@ int main(void)
     }
     expect_u32("null schedule", source_schedule_take(NULL, 0, next_ns), 0);
 
+    {
+        const unsigned long cap = 12288;
+        const unsigned long limit = cap - SOURCE_FLOOD_RESERVE;
+
+        expect_u32("flood room on an empty list",
+                   source_flood_room(0, cap, SOURCE_FLOOD_BATCH),
+                   SOURCE_FLOOD_BATCH);
+        expect_u32("flood room short of the reserve",
+                   source_flood_room(limit - 10, cap, SOURCE_FLOOD_BATCH), 10);
+        expect_u32("no flood room at the reserve",
+                   source_flood_room(limit, cap, SOURCE_FLOOD_BATCH), 0);
+        expect_u32("no flood room inside the reserve",
+                   source_flood_room(cap - 1, cap, SOURCE_FLOOD_BATCH), 0);
+        expect_u32("no flood room past the cap",
+                   source_flood_room(cap + 5, cap, SOURCE_FLOOD_BATCH), 0);
+        expect_u32("no flood room when the cap is the reserve",
+                   source_flood_room(0, SOURCE_FLOOD_RESERVE,
+                                     SOURCE_FLOOD_BATCH), 0);
+        expect_u32("no flood room when none is wanted",
+                   source_flood_room(0, cap, 0), 0);
+    }
+
+    source_ctl_init(&ctl, 1);
+    ctl.flood_spent = 1;
+    expect_int("flood on after the budget is refused",
+               source_ctl_apply(&ctl, "flood on"), -1);
+    expect_int("spent flood stays off", ctl.flood, 0);
+    expect_text("spent flood error", ctl.error, "flood budget used");
+    expect_int("mute still works after the budget",
+               source_ctl_apply(&ctl, "mute"), 0);
+    expect_int("flood off still works after the budget",
+               source_ctl_apply(&ctl, "flood off"), 0);
+    expect_int("stop still works after the budget",
+               source_ctl_apply(&ctl, "stop"), 0);
+
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

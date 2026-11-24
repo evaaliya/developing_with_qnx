@@ -96,20 +96,19 @@ static void open_telemetry(void)
 #define SEND_TIMEOUT_SECONDS 5u
 #define MANIFEST_TIMEOUT_SECONDS 20u
 
-static void on_alarm(int signo)
+/*
+ * Limit the next MsgSend on this thread only. alarm() is aimed at the
+ * process, so with the timer, flood, and device threads its SIGALRM
+ * could interrupt a thread other than the one that is stuck (D-061).
+ * TimerTimeout is cleared by the next kernel call, so arm it last.
+ */
+static int arm_send_timeout(unsigned seconds)
 {
-    (void)signo;
-}
+    uint64_t timeout = (uint64_t)seconds * 1000000000ULL;
 
-static int install_alarm(void)
-{
-    struct sigaction action;
-
-    memset(&action, 0, sizeof action);
-    action.sa_handler = on_alarm;
-    if (sigemptyset(&action.sa_mask) == -1 ||
-        sigaction(SIGALRM, &action, NULL) == -1) {
-        fprintf(stderr, "source: could not arrange a send timeout: %s\n",
+    if (TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY,
+                     NULL, &timeout, NULL) == -1) {
+        fprintf(stderr, "source: arming a send timeout failed: %s\n",
                 strerror(errno));
         return -1;
     }
@@ -305,9 +304,10 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
     }
 
     memset(&reply, 0, sizeof reply);
-    alarm(SEND_TIMEOUT_SECONDS);
+    if (arm_send_timeout(SEND_TIMEOUT_SECONDS) != 0) {
+        return -1;
+    }
     sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
-    alarm(0);
     if (sent == -1) {
         fprintf(stderr, "source: sending signal %" PRIu64 " failed: %s\n",
                 number, strerror(errno));
@@ -342,9 +342,10 @@ static int send_manifest(int coid, struct signal_manifest *manifest,
     }
     publish_source(1);
     manifest->count = (uint16_t)recorded;
-    alarm(MANIFEST_TIMEOUT_SECONDS);
+    if (arm_send_timeout(MANIFEST_TIMEOUT_SECONDS) != 0) {
+        return -1;
+    }
     sent = MsgSend(coid, manifest, sizeof *manifest, NULL, 0);
-    alarm(0);
     if (sent == -1) {
         fprintf(stderr, "source: sending the manifest failed: %s\n",
                 strerror(errno));
@@ -604,6 +605,7 @@ static int send_flood_batch(unsigned count)
     struct signal_batch batch;
     unsigned i;
     unsigned sent_n = 0;
+    unsigned room;
     long sent;
     int64_t now;
     int64_t deadline;
@@ -627,6 +629,24 @@ static int send_flood_batch(unsigned count)
         pthread_mutex_unlock(&g_issue_lock);
         return 0;
     }
+    room = source_flood_room(*g_live.recorded, SIGNAL_MANIFEST_CAP, count);
+    if (room == 0) {
+        unsigned long taken = *g_live.recorded;
+
+        pthread_mutex_unlock(&g_issue_lock);
+        ctl_lock();
+        g_ctl.flood = 0;
+        g_ctl.flood_spent = 1;
+        ctl_unlock();
+        printf("source: flood budget used at %lu of %u issued numbers, "
+               "%u kept for the live schedule; flood off (D-061)\n",
+               taken, (unsigned)SIGNAL_MANIFEST_CAP,
+               (unsigned)SOURCE_FLOOD_RESERVE);
+        fflush(stdout);
+        publish_source(0);
+        return 0;
+    }
+    count = room;
     for (i = 0; i < count; i++) {
         if (*g_live.full || *g_live.recorded >= SIGNAL_MANIFEST_CAP) {
             if (!*g_live.full) {
@@ -657,12 +677,22 @@ static int send_flood_batch(unsigned count)
     /*
      * The numbers are on the issued list. Release the lock before the
      * send, so the URGENT timer thread never waits for a batch to be
-     * admitted (D-060).
+     * admitted (D-060). The send has its own time limit (D-061).
      */
     pthread_mutex_unlock(&g_issue_lock);
+    if (arm_send_timeout(SEND_TIMEOUT_SECONDS) != 0) {
+        pthread_mutex_lock(&g_issue_lock);
+        g_live.failed = 1;
+        pthread_mutex_unlock(&g_issue_lock);
+        return -1;
+    }
     sent = MsgSend(g_live.coid, &batch, sizeof batch, NULL, 0);
     if (sent == -1 || sent != EOK) {
-        if (sent == -1) {
+        if (sent == -1 && errno == ETIMEDOUT) {
+            fprintf(stderr, "source: the next node did not take a BACKGROUND "
+                    "batch within %u s; the flood thread stops\n",
+                    SEND_TIMEOUT_SECONDS);
+        } else if (sent == -1) {
             fprintf(stderr, "source: sending a BACKGROUND batch failed: %s\n",
                     strerror(errno));
         } else {
@@ -734,6 +764,39 @@ static void *flood_thread(void *arg)
     return NULL;
 }
 
+/*
+ * The send time limit frees a batch that waits to be received. A batch
+ * the relay already received waits for its reply, and on a name_attach
+ * channel (_NTO_CHF_UNBLOCK) the limit only asks the relay to unblock
+ * the sender. A stopped relay never answers, so the run does not wait
+ * for this thread forever; exit ends it (D-061).
+ */
+static int join_flood_thread(void)
+{
+    struct timespec until;
+    int rc;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &until) != 0) {
+        fprintf(stderr, "source: reading the monotonic clock failed: %s\n",
+                strerror(errno));
+        return -1;
+    }
+    until.tv_sec += (time_t)SEND_TIMEOUT_SECONDS + 1;
+    rc = pthread_timedjoin_monotonic(g_flood_thread, NULL, &until);
+    if (rc == ETIMEDOUT) {
+        fprintf(stderr, "source: the flood thread is still waiting for the "
+                "next node after %u s; ending the run without it\n",
+                SEND_TIMEOUT_SECONDS + 1);
+        return -1;
+    }
+    if (rc != EOK) {
+        fprintf(stderr, "source: joining the flood thread failed: %s\n",
+                strerror(rc));
+        return -1;
+    }
+    return 0;
+}
+
 static int run_live(int argc, char **argv)
 {
     static struct signal_manifest manifest;
@@ -757,7 +820,7 @@ static int run_live(int argc, char **argv)
     next_name = argv[2];
     source_ctl_init(&g_ctl, 1);
     open_telemetry();
-    if (install_alarm() != 0 || pin_cpu0() != 0) {
+    if (pin_cpu0() != 0) {
         return EXIT_FAILURE;
     }
     ceiling = sched_get_priority_max(SCHED_FIFO);
@@ -946,7 +1009,9 @@ static int run_live(int argc, char **argv)
     }
     pthread_mutex_unlock(&g_issue_lock);
     if (g_flood_started) {
-        pthread_join(g_flood_thread, NULL);
+        if (join_flood_thread() != 0) {
+            failed = 1;
+        }
         g_flood_started = 0;
     }
 
@@ -1046,7 +1111,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (install_alarm() != 0 || pin_cpu0() != 0) {
+    if (pin_cpu0() != 0) {
         return EXIT_FAILURE;
     }
     ceiling = sched_get_priority_max(SCHED_FIFO);
