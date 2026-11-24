@@ -143,7 +143,7 @@ RESTART_PLAN ?= all
 run-live-restart: upload
 	$(SCP) ./build/stall-probe root@localhost:/tmp/stall-probe
 	$(SCP) ./scripts/qnx-live-restart.sh root@localhost:/tmp/qnx-live-restart.sh
-	$(SSH) root@localhost 'chmod +x /tmp/qnx-live-restart.sh /tmp/stall-probe /tmp/supervisor /tmp/telemetry /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-live-restart.sh $(RESTART_S) $(RESTART_PLAN)'
+	bash scripts/live-restart-check.sh $(RESTART_S) $(RESTART_PLAN)
 
 run-flood-hang: upload
 	$(SCP) ./scripts/qnx-flood-hang.sh root@localhost:/tmp/qnx-flood-hang.sh
