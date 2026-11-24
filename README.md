@@ -63,7 +63,7 @@ Any fault leads to SAFE, and only URGENT signals arriving in time lead out of it
 
 ### Books that survive a kill
 
-In the live network the source closes issued numbers while it runs, so a run has no length limit. The books of each node (the source's issued numbers, the sink's ledger, each relay's dropped list) live in POSIX shared memory. A node restarted by the supervisor continues the dead node's books, so numbers never repeat and the totals cover the whole run. What does not survive a kill: the queue of a killed relay (counted as lost), the sink's network state (back to INIT), and the source mode.
+In the live network the source closes issued numbers while it runs, so a run has no length limit. The books of each node (the source's issued numbers, the sink's ledger, each relay's dropped list) live in POSIX shared memory. A node restarted by the supervisor continues the dead node's books, so numbers never repeat and the totals cover the whole run. A restarted source also takes back the dead source's mode (flood or mute). What does not survive a kill: the queue of a killed relay (counted as lost) and the sink's network state (back to INIT).
 
 ## Build and run
 
@@ -138,9 +138,8 @@ From one build on 2026-11-24 (full output in [QNX_EVIDENCE.md](QNX_EVIDENCE.md))
 
 ## Known limitations
 
-- The guest runs under software emulation. A priority-31 probe shows the whole guest stopping for 5–33 ms at times; every late URGENT in the live checks fell inside such a stop, but in two scenario runs this is not proven, and `make scenarios` has needed more than one run.
-- The guest kernel stopped once during a test run; the cause is not found yet.
-- A restarted source starts in normal mode, not in the flood or mute mode of the source it replaces.
+- The guest runs under software emulation. A priority-31 probe runs beside every guest check and shows the whole guest stopping for 5–33 ms at times. A late URGENT or COMMAND inside such a stop is printed and does not fail the check; one outside it fails the check. `make scenarios` still fails now and then on a late URGENT outside any stop, and the cause is not found yet.
+- The guest kernel has stopped twice on its own clock check (in `clock_ist`, the clock interrupt thread) under emulation. It did not happen in 20 runs in a row afterwards.
 - Both ends of the network are simulated.
 
 ## Repository layout
