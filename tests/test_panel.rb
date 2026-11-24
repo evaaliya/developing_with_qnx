@@ -169,7 +169,14 @@ failures = check("panel ssh uses port 2222 in batch mode",
                  argv.include?("BatchMode=yes") && argv.include?("root@localhost"),
                  failures)
 failures = check("panel ssh writes the device",
-                 argv.last == "echo 'flood on' > /dev/signal-source", failures)
+                 argv.last.start_with?("echo 'flood on' > /dev/signal-source && "), failures)
+failures = check("panel ssh reads mode and error back",
+                 argv.last.end_with?("grep -E '^(mode|error) ' /dev/signal-source"), failures)
+stopped = lambda { |_a| [0, "mode normal\nerror flood stopped: 10240 signals wait to be closed\n", ""] }
+result = PanelControl.send_command("flood-on", stopped)
+failures = check("a flood that stopped itself shows its reason",
+                 PanelControl.result_text(result).include?("error flood stopped: 10240 signals wait to be closed"),
+                 failures)
 
 seen = []
 ok_runner = lambda { |a| seen << a; [0, "", ""] }

@@ -33,13 +33,15 @@ module PanelControl
   end
 
   # The same ssh as the Makefile: port 2222, root, the user's key, batch mode.
+  # After the write it reads back mode and error, so a flood that source
+  # turned off again (D-062) shows its reason next to the button.
   def ssh_argv(command)
     key = File.join(Dir.home, ".ssh", "id_ed25519")
     [
       "ssh", "-p", "2222", "-i", key,
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
       "root@localhost",
-      "echo '#{command}' > #{DEVICE}"
+      "echo '#{command}' > #{DEVICE} && sleep 0.2 && grep -E '^(mode|error) ' #{DEVICE}"
     ]
   end
 
@@ -97,7 +99,9 @@ module PanelControl
 
   def result_text(result)
     if result[:ok]
-      "sent \"#{result[:command]}\"; the mode above comes from telemetry"
+      status = result[:output].to_s.split("\n").map(&:strip).reject(&:empty?).join("; ")
+      status = status.empty? ? "" : " (source: #{status})"
+      "sent \"#{result[:command]}\"#{status}; the mode above comes from telemetry"
     elsif result[:command].nil?
       "refused: #{result[:error].strip}"
     else
