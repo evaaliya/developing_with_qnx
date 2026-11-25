@@ -31,6 +31,7 @@ int arm_link_on_urgent(struct arm_link *link, const struct signal *sig,
         __atomic_store_n(&link->event_ns, sig->arm.event_ns, __ATOMIC_RELAXED);
         __atomic_store_n(&link->stop_issued_ns, sig->issued_ns,
                          __ATOMIC_RELAXED);
+        __atomic_store_n(&link->stop_number, sig->number, __ATOMIC_RELAXED);
     }
     __atomic_store_n(&link->person_in, in, __ATOMIC_RELEASE);
     return in;
@@ -84,6 +85,7 @@ void arm_link_read(const struct arm_link *link, struct arm_link_view *view)
     view->event_ns = __atomic_load_n(&link->event_ns, __ATOMIC_RELAXED);
     view->stop_issued_ns = __atomic_load_n(&link->stop_issued_ns,
                                            __ATOMIC_RELAXED);
+    view->stop_number = __atomic_load_n(&link->stop_number, __ATOMIC_RELAXED);
     view->state_ok = __atomic_load_n(&link->state_ok, __ATOMIC_ACQUIRE);
     view->state_since_ns = __atomic_load_n(&link->state_since_ns,
                                            __ATOMIC_RELAXED);
@@ -121,6 +123,144 @@ void arm_drive_init(struct arm_drive *drive, int64_t now_ns)
     arm_brake(&drive->arm, now_ns);
     arm_step(&drive->arm, now_ns);
     drive->reason = ARM_BRAKE_STATE;
+}
+
+const char *arm_track_end_name(int end)
+{
+    switch (end) {
+    case ARM_TRACK_STOP:
+        return "stop";
+    case ARM_TRACK_TOUCH:
+        return "touch";
+    case ARM_TRACK_FULL:
+        return "full";
+    default:
+        return "open";
+    }
+}
+
+const char *arm_brake_reason_name(int reason)
+{
+    switch (reason) {
+    case ARM_BRAKE_PERSON:
+        return "person";
+    case ARM_BRAKE_STATE:
+        return "state";
+    default:
+        return "none";
+    }
+}
+
+static int32_t eye_um_now(const struct arm_state *arm)
+{
+    double um = arm_eye_distance(arm->q) * 1e6;
+
+    return (int32_t)(um + 0.5);
+}
+
+static void track_end(struct arm_track *tr, int end)
+{
+    tr->active = 0;
+    __atomic_store_n(&tr->end, end, __ATOMIC_RELEASE);
+}
+
+static void track_point(struct arm_drive *drive, int64_t t)
+{
+    struct arm_track *tr = &drive->track;
+    double eye = arm_eye_distance(drive->arm.q);
+    unsigned n = tr->count;
+
+    if (n >= ARM_TRACK_CAP) {
+        track_end(tr, ARM_TRACK_FULL);
+        return;
+    }
+    tr->eye_um[n] = eye_um_now(&drive->arm);
+    __atomic_store_n(&tr->count, n + 1, __ATOMIC_RELEASE);
+    if (eye <= ARM_TOUCH_M && n > 0) {
+        /* Between the last point and this one, at the last speed. */
+        double prev_m = tr->eye_um[n - 1] / 1e6;
+        int64_t at = t;
+
+        if (tr->last_speed > 0.0) {
+            int64_t dt = (int64_t)(prev_m / tr->last_speed * 1e9);
+
+            if (dt >= 0 && dt < ARM_TRACK_STEP_NS) {
+                at = t - ARM_TRACK_STEP_NS + dt;
+            }
+        }
+        tr->touch_ns = at;
+        track_end(tr, ARM_TRACK_TOUCH);
+        return;
+    }
+    tr->last_speed = drive->arm.speed;
+}
+
+/* A new approach: the target changed and no track has ended yet. */
+static void track_start(struct arm_drive *drive)
+{
+    struct arm_track *tr = &drive->track;
+
+    if (__atomic_load_n(&tr->end, __ATOMIC_RELAXED) != ARM_TRACK_OPEN) {
+        return;
+    }
+    __atomic_store_n(&tr->count, 0, __ATOMIC_RELAXED);
+    tr->active = 1;
+    tr->start_ns = drive->arm.t_ns;
+    tr->next_ns = tr->start_ns + ARM_TRACK_STEP_NS;
+    tr->last_speed = 0.0;
+    tr->touch_ns = 0;
+    tr->stop_number = 0;
+    if (drive->arm.brake) {
+        tr->brake_ns = drive->arm.brake_ns;
+        tr->brake_by = (int)drive->reason;
+    } else {
+        tr->brake_ns = 0;
+        tr->brake_by = ARM_BRAKE_NONE;
+    }
+    track_point(drive, tr->start_ns);
+}
+
+/* The brake engaged at at_ns for reason, during the track. */
+static void track_brake(struct arm_drive *drive, int64_t at_ns, int reason,
+                        uint64_t number)
+{
+    struct arm_track *tr = &drive->track;
+
+    if (!tr->active || tr->brake_by != ARM_BRAKE_NONE) {
+        return;
+    }
+    tr->brake_ns = at_ns;
+    tr->brake_by = reason;
+    tr->stop_number = reason == ARM_BRAKE_PERSON ? number : 0;
+}
+
+/* arm_step to t, with a track point at each grid time on the way. */
+static void advance(struct arm_drive *drive, int64_t t)
+{
+    struct arm_track *tr = &drive->track;
+
+    while (tr->active && tr->next_ns <= t) {
+        int64_t g = tr->next_ns;
+
+        arm_step(&drive->arm, g);
+        tr->next_ns += ARM_TRACK_STEP_NS;
+        track_point(drive, g);
+    }
+    arm_step(&drive->arm, t);
+}
+
+static int target_differs(const struct arm_state *arm, const double target[ARM_JOINTS])
+{
+    int i;
+
+    for (i = 0; i < ARM_JOINTS; i++) {
+        double d = arm->target[i] - target[i];
+
+        if (d > 1e-9 || d < -1e-9) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void remember(struct arm_drive *drive)
@@ -192,8 +332,13 @@ int arm_drive_update(struct arm_drive *drive, const struct arm_link_view *view,
     int done = 0;
 
     if (view->target_seq != 0 && view->target_seq != drive->target_seq_seen) {
+        int changed = target_differs(arm, view->target);
+
         drive->target_seq_seen = view->target_seq;
         arm_set_target(arm, view->target);
+        if (changed) {
+            track_start(drive);
+        }
     }
     if (!arm->brake) {
         if (view->person_in) {
@@ -204,36 +349,47 @@ int arm_drive_update(struct arm_drive *drive, const struct arm_link_view *view,
             drive->pending.issued_ns = view->stop_issued_ns;
             drive->pending.brake_ns = at < arm->t_ns ? arm->t_ns : at;
             if (view->event_ns > arm->t_ns) {
-                arm_step(arm, view->event_ns);
+                advance(drive, view->event_ns);
                 remember(drive);
             }
             drive->pending.eye_at_event_m = eye_at(drive, view->event_ns);
-            arm_step(arm, drive->pending.brake_ns);
+            advance(drive, drive->pending.brake_ns);
             remember(drive);
             drive->pending.eye_at_brake_m = arm_eye_distance(arm->q);
             arm_brake(arm, drive->pending.brake_ns);
+            track_brake(drive, arm->brake_ns, ARM_BRAKE_PERSON, view->stop_number);
             drive->reason = ARM_BRAKE_PERSON;
             drive->report_due = 1;
             drive->person_stops++;
         } else if (!view->state_ok) {
             arm_brake(arm, view->state_since_ns);
+            track_brake(drive, arm->brake_ns, ARM_BRAKE_STATE, 0);
             drive->reason = ARM_BRAKE_STATE;
             drive->state_stops++;
         }
     } else if (!view->person_in && view->state_ok) {
         if (drive->report_due) {
-            arm_step(arm, now_ns);
+            advance(drive, now_ns);
             finish(drive, out, !arm->stopped);
             done = 1;
         }
         arm_release(arm);
         drive->reason = ARM_BRAKE_NONE;
+        if (drive->track.active) {
+            /* The brake that counts is the next one. */
+            drive->track.brake_ns = 0;
+            drive->track.brake_by = ARM_BRAKE_NONE;
+            drive->track.stop_number = 0;
+        }
     } else if (view->person_in && drive->reason == ARM_BRAKE_STATE) {
         /* Already held by the state; the zone keeps it held. */
         drive->reason = ARM_BRAKE_PERSON;
     }
-    arm_step(arm, now_ns);
+    advance(drive, now_ns);
     remember(drive);
+    if (drive->track.active && arm->brake && arm->stopped && view->person_in) {
+        track_end(&drive->track, ARM_TRACK_STOP);
+    }
     if (drive->report_due && arm->stopped) {
         finish(drive, out, 0);
         done = 1;

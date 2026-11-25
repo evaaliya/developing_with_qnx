@@ -21,6 +21,8 @@ struct arm_link {
     int64_t person_since_ns;
     int64_t event_ns;
     int64_t stop_issued_ns;
+    /* Number of the URGENT that turned the zone on (D-085). */
+    uint64_t stop_number;
     /* Issue time of the newest URGENT that set the zone. */
     int64_t zone_issued_ns;
     /* Network state lets the arm move (NORMAL, DEGRADED, RECOVERING). */
@@ -37,6 +39,7 @@ struct arm_link_view {
     int64_t person_since_ns;
     int64_t event_ns;
     int64_t stop_issued_ns;
+    uint64_t stop_number;
     int state_ok;
     int64_t state_since_ns;
     uint32_t target_seq;
@@ -91,8 +94,52 @@ enum arm_brake_reason {
     ARM_BRAKE_STATE = 2
 };
 
+/*
+ * The track for the replay (D-085): the tool's eye distance on a fixed
+ * grid of model time from the start of an approach (the first step with
+ * a joint target unlike the last) to its end. Points are computed on the
+ * grid even when a model step comes late. The model thread writes it;
+ * count and end are published with release stores, so another thread
+ * may read the points below count at any time.
+ */
+#define ARM_TRACK_STEP_NS 2000000LL
+#define ARM_TRACK_CAP 1024
+/* At or under this distance the tool touches the eye (as before_eye). */
+#define ARM_TOUCH_M 1e-6
+
+enum arm_track_end {
+    ARM_TRACK_OPEN = 0,
+    /* The arm rests after a brake while the person is in the zone. */
+    ARM_TRACK_STOP = 1,
+    /* The tool reached the eye. */
+    ARM_TRACK_TOUCH = 2,
+    /* ARM_TRACK_CAP points and neither. */
+    ARM_TRACK_FULL = 3
+};
+
+struct arm_track {
+    int active;
+    int64_t start_ns;
+    int64_t next_ns;
+    double last_speed;
+    unsigned count;
+    int end;
+    /* The brake during this track: when, and why (enum arm_brake_reason). */
+    int64_t brake_ns;
+    int brake_by;
+    /* The URGENT that braked, when the person braked it; else 0. */
+    uint64_t stop_number;
+    /* When the tool reached the eye, to the grid step; else 0. */
+    int64_t touch_ns;
+    int32_t eye_um[ARM_TRACK_CAP];
+};
+
+const char *arm_track_end_name(int end);
+const char *arm_brake_reason_name(int reason);
+
 struct arm_drive {
     struct arm_state arm;
+    struct arm_track track;
     uint32_t target_seq_seen;
     enum arm_brake_reason reason;
     int report_due;

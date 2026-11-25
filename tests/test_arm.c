@@ -293,11 +293,148 @@ static void test_late_and_early(void)
     }
 }
 
+/*
+ * The track for the replay (D-085): the tool's eye distance on a 2 ms
+ * grid of model time from the start of the approach to the stop or the
+ * touch, even when a model step is late.
+ */
+static void step_to(struct arm_drive *d, struct arm_link *link, int64_t t)
+{
+    struct arm_link_view v;
+    struct arm_stop_report r;
+
+    arm_link_read(link, &v);
+    (void)arm_drive_update(d, &v, t, &r);
+}
+
+static void test_track(void)
+{
+    struct arm_link link;
+    struct arm_drive d;
+    struct signal s;
+    int64_t t;
+    unsigned i;
+    int steady = 1;
+    int grid = 1;
+    double prev;
+
+    /* A stop: person in at 300 ms, brake at 302 ms by URGENT 4242. */
+    arm_link_init(&link);
+    arm_drive_init(&d, 0);
+    arm_link_on_state(&link, 1, 0);
+    s = command_to(1, 0);
+    arm_link_on_command(&link, &s);
+    expect_int("no track before the first target", d.track.count, 0);
+    for (t = 0; t <= 290 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+        if (t == 100 * MS) {
+            /* The schedule repeats the same target: no new track. */
+            s = command_to(1, 100 * MS);
+            arm_link_on_command(&link, &s);
+        }
+    }
+    /* One late model step: 9 ms. */
+    step_to(&d, &link, 299 * MS);
+    s = urgent(1, 301 * MS, 300 * MS);
+    s.number = 4242;
+    arm_link_on_urgent(&link, &s, 302 * MS);
+    for (t = 301 * MS; t <= 900 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    expect_int("track starts at the approach", d.track.start_ns, 0);
+    expect_int("track ends at the stop", d.track.end, ARM_TRACK_STOP);
+    expect_int("brake by the person", d.track.brake_by, ARM_BRAKE_PERSON);
+    expect_int("brake time from the receive thread", d.track.brake_ns, 302 * MS);
+    expect_int("the URGENT that braked", (long long)d.track.stop_number, 4242);
+    expect_int("no touch", d.track.touch_ns, 0);
+    {
+        int64_t last_t = d.track.start_ns + (int64_t)(d.track.count - 1) * 2 * MS;
+        int64_t off = last_t - d.arm.stopped_ns;
+
+        expect_int("samples to the rest, one per 2 ms",
+                   off >= -2 * MS && off <= 2 * MS, 1);
+    }
+    prev = d.track.eye_um[0];
+    for (i = 1; i < d.track.count; i++) {
+        double e = d.track.eye_um[i];
+
+        if (e > prev + 1.0) {
+            steady = 0;
+        }
+        if (prev - e > 510.0) {
+            grid = 0;
+        }
+        prev = e;
+    }
+    expect_int("the tool never moves away from the eye on the way in", steady, 1);
+    expect_int("no gap of more than 0.5 mm, also over the late step", grid, 1);
+    expect_near("first sample at home, 199.5 mm", d.track.eye_um[0] / 1000.0, 199.5, 0.2);
+    expect_near("sample at the event, 75 mm on", d.track.eye_um[150] / 1000.0,
+                199.5 - 75.0, 2.0);
+    expect_near("last sample is the rest", d.track.eye_um[d.track.count - 1] / 1e6,
+                arm_eye_distance(d.arm.q), 1e-6);
+    s = command_to(0, 905 * MS);
+    arm_link_on_command(&link, &s);
+    s = urgent(0, 906 * MS, 906 * MS);
+    arm_link_on_urgent(&link, &s, 907 * MS);
+    for (t = 902 * MS; t <= 1200 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    expect_int("a finished track is kept when the arm goes home", d.track.start_ns, 0);
+    expect_int("and its end stays", d.track.end, ARM_TRACK_STOP);
+
+    /* No URGENT gets through: the tool goes on and touches the eye. */
+    arm_link_init(&link);
+    arm_drive_init(&d, 0);
+    arm_link_on_state(&link, 1, 0);
+    for (t = 0; t <= 8 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    s = command_to(1, 10 * MS);
+    arm_link_on_command(&link, &s);
+    for (t = 10 * MS; t <= 1300 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    expect_int("touch ends the track", d.track.end, ARM_TRACK_TOUCH);
+    expect_int("touch: the approach starts at the step with the target",
+               d.track.start_ns, 8 * MS);
+    expect_near("touch about 799 ms into the approach",
+                (d.track.touch_ns - d.track.start_ns) / 1e6, 799.0, 2.0);
+    expect_int("touch: last sample at the eye", d.track.eye_um[d.track.count - 1], 0);
+    expect_int("touch: no brake", d.track.brake_by, ARM_BRAKE_NONE);
+
+    /* SAFE holds the arm when the person comes: the state braked it. */
+    arm_link_init(&link);
+    arm_drive_init(&d, 0);
+    arm_link_on_state(&link, 1, 0);
+    s = command_to(1, 0);
+    arm_link_on_command(&link, &s);
+    for (t = 0; t <= 200 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    arm_link_on_state(&link, 0, 201 * MS);
+    for (t = 202 * MS; t <= 300 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    expect_int("SAFE alone does not end the track", d.track.end, ARM_TRACK_OPEN);
+    s = urgent(1, 301 * MS, 300 * MS);
+    s.number = 77;
+    arm_link_on_urgent(&link, &s, 302 * MS);
+    for (t = 302 * MS; t <= 500 * MS; t += 2 * MS) {
+        step_to(&d, &link, t);
+    }
+    expect_int("person in while held ends the track", d.track.end, ARM_TRACK_STOP);
+    expect_int("brake by the state", d.track.brake_by, ARM_BRAKE_STATE);
+    expect_int("brake time is the state change", d.track.brake_ns, 201 * MS);
+    expect_int("no stop number for a state brake", (long long)d.track.stop_number, 0);
+}
+
 int main(void)
 {
     test_model();
     test_drive();
     test_late_and_early();
+    test_track();
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;
