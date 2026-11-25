@@ -1,6 +1,7 @@
 #define _QNX_SOURCE
 
 #include "arm_drive.h"
+#include "arm_plan.h"
 #include "issued_log.h"
 #include "net_state.h"
 #include "node_store.h"
@@ -64,6 +65,13 @@ static unsigned g_arm_cost_us[ARM_COST_BUCKETS];
 static int64_t g_arm_cost_max_ns;
 static unsigned g_arm_urgent_in_step;
 static unsigned g_arm_reports;
+/*
+ * When the approach began, for the zone sensor in source (D-090). Read
+ * there from shared memory, not over the network. NULL when the object
+ * could not be made; the run goes on and a planned event cannot come.
+ */
+static struct arm_approach *g_approach;
+static int64_t g_approach_published;
 
 /* Whole-run totals are kept by the ledger; no pass over the ring (D-062). */
 static void class_counts(const struct signal_ledger *ledger, uint32_t id,
@@ -613,6 +621,12 @@ static void *arm_thread(void *arg)
         t0 = monotonic_ns();
         arm_link_read(&g_arm_link, &view);
         done = arm_drive_update(&g_drive, &view, t0, &report);
+        if (g_approach != NULL && g_drive.track.count > 0 &&
+            g_drive.track.start_ns != g_approach_published) {
+            g_approach_published = g_drive.track.start_ns;
+            arm_approach_publish(g_approach, g_drive.track.start_ns,
+                                 g_drive.track.eye_um[0]);
+        }
         cost = monotonic_ns() - t0;
         __atomic_store_n(&g_arm_busy, 0, __ATOMIC_RELAXED);
         us = (unsigned)(cost / 1000);
@@ -647,6 +661,16 @@ static void start_arm(void)
 
     arm_link_init(&g_arm_link);
     arm_drive_init(&g_drive, monotonic_ns());
+    {
+        enum node_store_found found;
+
+        g_approach = node_store_map(ARM_APPROACH_STORE, sizeof *g_approach, 0,
+                                    &found);
+        if (g_approach == NULL) {
+            fprintf(stderr, "sink: making %s failed: %s; no planned event "
+                    "can come\n", ARM_APPROACH_STORE, strerror(errno));
+        }
+    }
     if (off != NULL && strcmp(off, "0") == 0) {
         printf("sink: arm model off (SIGNAL_ARM=0)\n");
         fflush(stdout);
@@ -1044,6 +1068,10 @@ int main(int argc, char **argv)
     /* The run is over and a clean exit is not restarted: free the books. */
     if (node_store_remove(SIGNAL_LEDGER_STORE) != 0) {
         fprintf(stderr, "sink: removing %s failed: %s\n", SIGNAL_LEDGER_STORE,
+                strerror(errno));
+    }
+    if (node_store_remove(ARM_APPROACH_STORE) != 0) {
+        fprintf(stderr, "sink: removing %s failed: %s\n", ARM_APPROACH_STORE,
                 strerror(errno));
     }
     return EXIT_SUCCESS;

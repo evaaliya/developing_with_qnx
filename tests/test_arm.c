@@ -1,5 +1,6 @@
 #include "arm_drive.h"
 #include "arm_model.h"
+#include "arm_plan.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -429,12 +430,124 @@ static void test_track(void)
     expect_int("no stop number for a state brake", (long long)d.track.stop_number, 0);
 }
 
+/* Eye distance at t from the track, linear between grid points, m. */
+static double track_eye_at(const struct arm_track *tr, int64_t t)
+{
+    int64_t off = t - tr->start_ns;
+    unsigned i = (unsigned)(off / ARM_TRACK_STEP_NS);
+    double f = (double)(off % ARM_TRACK_STEP_NS) / (double)ARM_TRACK_STEP_NS;
+
+    if (i + 1 >= tr->count) {
+        return tr->eye_um[tr->count - 1] / 1e6;
+    }
+    return (tr->eye_um[i] + (tr->eye_um[i + 1] - tr->eye_um[i]) * f) / 1e6;
+}
+
+/*
+ * One planned approach (D-089, D-090): the target arrives between model
+ * steps, steps come late by up to 1.9 ms, "person in" is issued at the
+ * approach start plus the planned time, and the brake follows delay_ms
+ * later. *event_m: eye distance at the event by the track; *rest_m: where
+ * the tool rests. The track end is returned.
+ */
+static int planned_stop(int64_t delay_ns, int64_t offset_ns, double *event_m,
+                        double *rest_m)
+{
+    struct arm_link link;
+    struct arm_drive d;
+    struct signal s;
+    int64_t t = 1000 * MS;
+    int64_t event = 0;
+    int64_t brake = 0;
+    int sent = 0;
+    unsigned k = 0;
+
+    arm_link_init(&link);
+    arm_drive_init(&d, t);
+    arm_link_on_state(&link, 1, t);
+    s = command_to(1, t);
+    while (t < 3000 * MS) {
+        /* Steps 2 ms apart, every third one late by up to 1.9 ms. */
+        int64_t late = (k % 3 == 2) ? (int64_t)((k * 7) % 20) * 95000LL : 0;
+
+        if (!sent && t >= 1007 * MS) {
+            arm_link_on_command(&link, &s);
+            sent = 1;
+        }
+        if (d.track.count > 0 && event == 0) {
+            event = d.track.start_ns + offset_ns;
+            brake = event + delay_ns;
+        }
+        if (brake != 0 && t + 2 * MS + late > brake && !link.person_in) {
+            struct signal u = urgent(1, event, event);
+
+            u.number = 9;
+            arm_link_on_urgent(&link, &u, brake);
+        }
+        t += 2 * MS;
+        step_to(&d, &link, t + late);
+        k++;
+        if (d.track.end != ARM_TRACK_OPEN) {
+            break;
+        }
+    }
+    *event_m = track_eye_at(&d.track, event);
+    *rest_m = d.track.end == ARM_TRACK_TOUCH ? 0.0 : arm_eye_distance(d.arm.q);
+    return d.track.end;
+}
+
+static void test_plan(void)
+{
+    int64_t offset = arm_plan_time_to_distance_ns(arm_plan_event_distance_m());
+    static const int delays_ms[] = { 0, 10, 31 };
+    double event_m;
+    double rest_m;
+    unsigned i;
+    int end;
+    struct arm_approach a;
+    int64_t start = 0;
+    int32_t eye_um = 0;
+
+    expect_near("plan margin is 31 ms x 250 mm/s", ARM_PLAN_MARGIN_M, 0.00775, 1e-12);
+    expect_near("event distance is margin + braking path", arm_plan_event_distance_m(),
+                0.03275, 1e-12);
+    expect_near("time to the event point", (double)offset / 1e6, 668.141, 0.001);
+    for (i = 0; i < sizeof delays_ms / sizeof delays_ms[0]; i++) {
+        char name[96];
+        double want = 0.007754 - ARM_SPEED_M_S * delays_ms[i] * 1e-3;
+
+        end = planned_stop(delays_ms[i] * MS, offset, &event_m, &rest_m);
+        snprintf(name, sizeof name, "delay %d ms: tool at 32.75 mm at the event",
+                 delays_ms[i]);
+        expect_near(name, event_m, 0.03275, 0.00001);
+        snprintf(name, sizeof name, "delay %d ms: rests 0.25 mm/ms past the plan",
+                 delays_ms[i]);
+        expect_near(name, rest_m, want, 0.00002);
+        snprintf(name, sizeof name, "delay %d ms: a stop, not a touch", delays_ms[i]);
+        expect_int(name, end, ARM_TRACK_STOP);
+    }
+    end = planned_stop(40 * MS, offset, &event_m, &rest_m);
+    expect_int("delay 40 ms (over the deadline): the tool touches the eye", end,
+               ARM_TRACK_TOUCH);
+    expect_near("delay 40 ms: the event point is the same", event_m, 0.03275, 0.00001);
+
+    memset(&a, 0, sizeof a);
+    expect_int("no approach yet", arm_approach_read(&a, &start, &eye_um), 0);
+    arm_approach_publish(&a, 123456789, 199500);
+    expect_int("approach published", arm_approach_read(&a, &start, &eye_um), 1);
+    expect_int("approach start", start, 123456789);
+    expect_int("approach start distance", eye_um, 199500);
+    a.magic = 7;
+    expect_int("a foreign object is refused", arm_approach_read(&a, &start, &eye_um), -1);
+}
+
 int main(void)
 {
     test_model();
     test_drive();
     test_late_and_early();
     test_track();
+    test_plan();
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

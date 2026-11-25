@@ -12,13 +12,14 @@ SINK_SRC=(src/sink/sink.c src/common/signal_msg.c src/common/net_state.c
     src/common/signal_ledger.c src/common/issued_log.c
     src/common/telemetry_snap.c src/common/telemetry_pub.c
     src/common/latency_stats.c src/common/node_store.c
-    src/common/arm_model.c src/common/arm_drive.c -lsocket -lm)
+    src/common/arm_model.c src/common/arm_drive.c src/common/arm_plan.c
+    -lsocket -lm)
 SOURCE_SRC=(src/source/source.c src/common/signal_msg.c src/common/issue_order.c
     src/common/issued_log.c src/common/source_ctl.c
     src/common/net_state.c src/common/telemetry_snap.c
     src/common/telemetry_pub.c src/common/latency_stats.c
     src/common/close_list.c src/common/live_book.c src/common/node_store.c
-    -lsocket)
+    src/common/arm_model.c src/common/arm_plan.c -lsocket -lm)
 RELAY_SRC=(src/relay/relay.c src/common/signal_msg.c src/common/signal_queue.c
     src/common/close_list.c src/common/drop_book.c src/common/node_store.c
     src/common/drop_notes.c)
