@@ -94,6 +94,8 @@ In the live network the source closes issued numbers while it runs, so a run has
 | `make run-live-restart` | 5 minutes under the supervisor; relay A, relay B, sink, and source each killed once |
 | `make panel-check` | Presses the panel buttons against the live network |
 | `make run-arm-stop` | 34 calm and 34 flooded runs of the simulated arm: "person in" at a random moment of the approach to the eye; delay to the brake, reaction and braking path, whether the arm stopped short of the eye |
+| `make naive` | Builds the same `source`, `relay` and `sink` as a naive network into `build/naive/`: one priority for everything, the relay queue in arrival order, the arriving signal of any class dropped when the queue is full |
+| `make run-arm-compare` | The arm stop on our network and on the naive one in one guest boot, in alternating blocks: 34 calm and 34 flooded runs of each; names the worst run of each network and writes the track of every run to `build/arm/latest/replay/` |
 
 Other targets (`run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `run-flood-hang`, `run-hold-urgent`, `run-long-flood`) each check one fault or load case. `scripts/series.sh N TARGET` runs a target N times and keeps every run's log under `build/series/`. Every target prints `PASS` or `FAIL` and exits non-zero on failure.
 
