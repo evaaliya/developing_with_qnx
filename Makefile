@@ -31,6 +31,9 @@ FLOOD_QUEUE := 8
 MEASURE_N ?= 34
 # Each measure run is killed after this many seconds; a run takes ~10 s (D-077).
 MEASURE_LIMIT_S ?= 180
+# Shell words put before each measure run on the guest, e.g.
+# MEASURE_ENV="export SIGNAL_ARM=0;" to measure without the arm model (D-080).
+MEASURE_ENV ?=
 # Calm runs with the sink free, then the same number pinned to CPU 0 (D-049).
 STALL_K ?= 20
 # Each make measure and make stall-check keeps its logs in its own
@@ -198,7 +201,7 @@ measure: upload build/latency-report
 	while [ "$$i" -le "$$n" ]; do \
 	  log=$$(printf '$(MEASURE_DIR)/calm-%02d.log' "$$i"); \
 	  set +e; \
-	  bash scripts/watchdog.sh $(MEASURE_LIMIT_S) calm-$$i $(MEASURE_DIR) $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) $$i" > "$$log"; \
+	  bash scripts/watchdog.sh $(MEASURE_LIMIT_S) calm-$$i $(MEASURE_DIR) $(SSH) root@localhost "$(MEASURE_ENV) chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh calm $(CHAIN_URGENT) $(CHAIN_COMMAND) $(CHAIN_BACKGROUND) $$i" > "$$log"; \
 	  status=$$?; \
 	  set -e; \
 	  if [ "$$status" -ne 0 ]; then \
@@ -215,7 +218,7 @@ measure: upload build/latency-report
 	while [ "$$i" -le "$$n" ]; do \
 	  log=$$(printf '$(MEASURE_DIR)/flood-%02d.log' "$$i"); \
 	  set +e; \
-	  bash scripts/watchdog.sh $(MEASURE_LIMIT_S) flood-$$i $(MEASURE_DIR) $(SSH) root@localhost "chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE) $$i" > "$$log"; \
+	  bash scripts/watchdog.sh $(MEASURE_LIMIT_S) flood-$$i $(MEASURE_DIR) $(SSH) root@localhost "$(MEASURE_ENV) chmod +x /tmp/qnx-scenario.sh /tmp/source /tmp/sink /tmp/relay; /tmp/qnx-scenario.sh flood $(FLOOD_URGENT) $(FLOOD_COMMAND) $(FLOOD_BACKGROUND) $(FLOOD_QUEUE) $$i" > "$$log"; \
 	  status=$$?; \
 	  set -e; \
 	  if [ "$$status" -ne 0 ]; then \
