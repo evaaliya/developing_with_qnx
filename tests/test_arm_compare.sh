@@ -37,6 +37,24 @@ expect "a log per run" "$(ls "$work/logs" | grep -c '\.log$')" 20
 expect "our network runs from /tmp" "$(cat "$work/logs/ours-calm-05.log")" "run calm 5 /tmp"
 expect "the naive one from /tmp/naive" "$(cat "$work/logs/naive-flood-02.log")" "run flood 2 /tmp/naive"
 
+# B29: more naive flooded runs, spread over the blocks; the event mode
+# goes to the run as its fourth argument.
+cat > "$work/echo-run.sh" <<'END'
+#!/bin/bash
+echo "run $*"
+exit 0
+END
+chmod +x "$work/echo-run.sh"
+out=$(ARM_COMPARE_RUN="$work/echo-run.sh" bash "$here/scripts/arm-compare.sh" 4 2 30 "$work/more" 7 plan 2>&1)
+expect "more naive flooded runs: exit 0" "$?" 0
+order=$(echo "$out" | sed -n 's/^arm-compare: \([a-z]*\) \([a-z]*\) \([0-9]*\) exit.*/\1-\2-\3/p' | tr '\n' ' ')
+expect "naive flood takes 4 runs a block, the last block the rest" "$order" \
+    "ours-calm-1 ours-calm-2 naive-calm-1 naive-calm-2 ours-flood-1 ours-flood-2 naive-flood-1 naive-flood-2 naive-flood-3 naive-flood-4 naive-calm-3 naive-calm-4 ours-calm-3 ours-calm-4 naive-flood-5 naive-flood-6 naive-flood-7 ours-flood-3 ours-flood-4 "
+expect "4 + 4 + 4 + 7 runs" "$(echo "$out" | tail -1)" "arm-compare: runs 19, failed 0"
+expect "the event mode reaches the run" "$(cat "$work/more/naive-flood-07.log")" "run flood 7 /tmp/naive plan"
+bash "$here/scripts/arm-compare.sh" 4 2 30 "$work/bad2" 7 sometimes > /dev/null 2>&1
+expect "an unknown event mode is refused" "$?" 2
+
 # A guest that stops answering ends the series with exit 3.
 cat > "$work/dead-run.sh" <<'EOF'
 #!/bin/bash

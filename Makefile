@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare run-arm-precise
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -94,7 +94,8 @@ test: build/latency-report
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-drop-notes \
 		tests/test_drop_notes.c src/common/drop_notes.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-arm \
-		tests/test_arm.c src/common/arm_model.c src/common/arm_drive.c -lm
+		tests/test_arm.c src/common/arm_model.c src/common/arm_drive.c \
+		src/common/arm_plan.c -lm
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-sched-ours \
 		tests/test_naive_sched.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -DSIGNAL_NAIVE=1 \
@@ -122,6 +123,7 @@ test: build/latency-report
 	/usr/bin/ruby tests/test_panel.rb
 	/usr/bin/ruby tests/test_arm_report.rb
 	/usr/bin/ruby tests/test_arm_compare.rb
+	/usr/bin/ruby tests/test_arm_precise.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
@@ -354,6 +356,28 @@ run-arm-compare: upload upload-naive
 	    $(ARM_DIR)/ours-*.log $(ARM_DIR)/naive-*.log; \
 	  echo $$? > $(ARM_DIR)/report.status; } | tee $(ARM_DIR)/report.txt
 	echo "run-arm-compare: series exit $$(cat $(ARM_DIR)/series.status), report exit $$(cat $(ARM_DIR)/report.status)"
+	[ "$$(cat $(ARM_DIR)/series.status)" = 0 ] && [ "$$(cat $(ARM_DIR)/report.status)" = 0 ]
+
+# The planned stop at the eye on both networks (D-089, D-090): the zone
+# sensor in source issues "person in" when the tool is 7.75 + 25.0 mm from
+# the eye. Alternating blocks as run-arm-compare; ARM_N calm and flooded
+# runs of ours, ARM_N calm and ARM_NAIVE_FLOOD_N flooded runs of the naive
+# network, spread over the blocks. The report checks the tool at the
+# event, names the runs for the video, and counts URGENT lost in a row.
+ARM_NAIVE_FLOOD_N ?= 100
+run-arm-precise: upload upload-naive
+	mkdir -p $(ARM_DIR)
+	ln -sfn runs/$(RUN_STAMP) build/arm/latest
+	echo "run-arm-precise: logs in $(ARM_DIR)"
+	$(SCP) ./scripts/qnx-arm-stop.sh root@localhost:/tmp/qnx-arm-stop.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-arm-stop.sh; uname -a' | tee $(ARM_DIR)/guest.txt
+	{ bash scripts/arm-compare.sh $(ARM_N) $(ARM_BLOCK) $(ARM_LIMIT_S) $(ARM_DIR) $(ARM_NAIVE_FLOOD_N) plan; \
+	  echo $$? > $(ARM_DIR)/series.status; } | tee $(ARM_DIR)/series.txt
+	{ /usr/bin/ruby scripts/arm_precise.rb --replay $(ARM_DIR)/replay \
+	    $(ARM_DIR)/ours-*.log $(ARM_DIR)/naive-*.log; \
+	  echo $$? > $(ARM_DIR)/report.status; } | tee $(ARM_DIR)/report.txt
+	/usr/bin/ruby scripts/arm_precise.rb --streaks $(ARM_DIR)/naive-flood-*.log | tee $(ARM_DIR)/streaks.txt
+	echo "run-arm-precise: series exit $$(cat $(ARM_DIR)/series.status), report exit $$(cat $(ARM_DIR)/report.status)"
 	[ "$$(cat $(ARM_DIR)/series.status)" = 0 ] && [ "$$(cat $(ARM_DIR)/report.status)" = 0 ]
 
 # Telemetry gives the arm to a client that sends "arm" (D-080).

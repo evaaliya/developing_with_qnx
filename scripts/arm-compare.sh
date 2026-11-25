@@ -4,7 +4,13 @@
 # that neither network has all its runs in a row. Block k runs, for calm
 # and then flood, BLOCK runs of each network; odd blocks start with ours,
 # even blocks with naive. Every run has the D-077 time limit.
-#   scripts/arm-compare.sh N BLOCK LIMIT_S LOG_DIR
+#   scripts/arm-compare.sh N BLOCK LIMIT_S LOG_DIR [NAIVE_FLOOD_N [EVENT]]
+# NAIVE_FLOOD_N (default N): flooded runs of the naive network. The
+# number of blocks comes from N; each block then takes its share of the
+# naive flooded runs (ceil(NAIVE_FLOOD_N / blocks)), so the extra runs are
+# spread over the whole series, not left to its end (B29).
+# EVENT (random or plan) goes to qnx-arm-stop.sh as its fourth argument;
+# without it the guest script keeps its default (random).
 # Logs: LOG_DIR/<ours|naive>-<calm|flood>-NN.log.
 # Exit 0 when every run passed, 1 when some failed (the series goes on),
 # 3 when the guest stopped answering (the series stops), 2 on bad use.
@@ -13,15 +19,24 @@
 # tests/test_arm_compare.sh); it gets MODE RUN BINDIR as arguments.
 set -u
 
-if [ "$#" -ne 4 ]; then
-    echo "usage: scripts/arm-compare.sh N BLOCK LIMIT_S LOG_DIR" >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
+    echo "usage: scripts/arm-compare.sh N BLOCK LIMIT_S LOG_DIR [NAIVE_FLOOD_N [EVENT]]" >&2
     exit 2
 fi
 n=$1
 block=$2
 limit=$3
 dir=$4
-for v in "$n" "$block" "$limit"; do
+naive_flood=${5:-$1}
+event=${6:-}
+case "$event" in
+    '' | random | plan) ;;
+    *)
+        echo "arm-compare: EVENT must be random or plan" >&2
+        exit 2
+        ;;
+esac
+for v in "$n" "$block" "$limit" "$naive_flood"; do
     case "$v" in
         '' | *[!0-9]* | 0)
             echo "arm-compare: N, BLOCK and LIMIT_S must be positive integers" >&2
@@ -46,10 +61,10 @@ one_run() {
     log=$(printf '%s/%s-%s-%02d.log' "$dir" "$net" "$mode" "$i")
     if [ -n "${ARM_COMPARE_RUN:-}" ]; then
         bash "$here/watchdog.sh" "$limit" "$net-$mode-$i" "$dir" \
-            $ARM_COMPARE_RUN "$mode" "$i" "$(bindir_of "$net")" > "$log" 2>&1
+            $ARM_COMPARE_RUN "$mode" "$i" "$(bindir_of "$net")" $event > "$log" 2>&1
     else
         bash "$here/watchdog.sh" "$limit" "$net-$mode-$i" "$dir" \
-            $ssh_guest "/tmp/qnx-arm-stop.sh $mode $i $(bindir_of "$net")" > "$log" 2>&1
+            $ssh_guest "/tmp/qnx-arm-stop.sh $mode $i $(bindir_of "$net") $event" > "$log" 2>&1
     fi
     status=$?
     echo "arm-compare: $net $mode $i exit $status"
@@ -68,10 +83,16 @@ while [ "$k" -le "$blocks" ]; do
     fi
     for mode in calm flood; do
         for net in $order; do
+            per=$block
+            total=$n
+            if [ "$net" = naive ] && [ "$mode" = flood ]; then
+                per=$(( (naive_flood + blocks - 1) / blocks ))
+                total=$naive_flood
+            fi
             j=1
-            while [ "$j" -le "$block" ]; do
-                i=$(( (k - 1) * block + j ))
-                if [ "$i" -gt "$n" ]; then
+            while [ "$j" -le "$per" ]; do
+                i=$(( (k - 1) * per + j ))
+                if [ "$i" -gt "$total" ]; then
                     break
                 fi
                 one_run "$net" "$mode" "$i"
