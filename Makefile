@@ -92,6 +92,7 @@ test: build/latency-report
 	./build/test-node-store
 	./build/test-drop-notes
 	sh tests/test_late_check.sh
+	bash tests/test_series_watchdog.sh
 	/usr/bin/ruby tests/test_panel.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
