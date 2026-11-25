@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -38,6 +38,11 @@ STALL_K ?= 20
 RUN_STAMP := $(shell date +%Y%m%d-%H%M%S)
 MEASURE_DIR := build/measure/runs/$(RUN_STAMP)
 STALL_DIR := build/stall/runs/$(RUN_STAMP)
+# Arm stop series (D-082): ARM_N calm runs, then ARM_N under the flood.
+# One "person in" per run; each run has the D-077 time limit.
+ARM_N ?= 34
+ARM_LIMIT_S ?= 120
+ARM_DIR := build/arm/runs/$(RUN_STAMP)
 
 default:
 	mkdir -p build
@@ -79,6 +84,8 @@ test: build/latency-report
 		tests/test_node_store.c src/common/node_store.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-drop-notes \
 		tests/test_drop_notes.c src/common/drop_notes.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-arm \
+		tests/test_arm.c src/common/arm_model.c src/common/arm_drive.c -lm
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
@@ -93,9 +100,11 @@ test: build/latency-report
 	./build/test-books
 	./build/test-node-store
 	./build/test-drop-notes
+	./build/test-arm
 	sh tests/test_late_check.sh
 	bash tests/test_series_watchdog.sh
 	/usr/bin/ruby tests/test_panel.rb
+	/usr/bin/ruby tests/test_arm_report.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
@@ -275,3 +284,33 @@ stall-check: upload build/latency-report
 	./build/latency-report --stalls $(STALL_DIR)/free-*.log; \
 	echo "=== pinned ==="; \
 	./build/latency-report --stalls $(STALL_DIR)/pinned-*.log
+
+# The arm stops for "person in" (D-080, D-082): delay from the event to
+# the brake, reaction path, braking path, stopped before the eye. Logs
+# of every run in build/arm/runs/<time>/; build/arm/latest points there.
+run-arm-stop: upload
+	mkdir -p $(ARM_DIR)
+	ln -sfn runs/$(RUN_STAMP) build/arm/latest
+	echo "run-arm-stop: logs in $(ARM_DIR)"
+	case '$(ARM_N)' in \
+	  ''|*[!0-9]*|0) echo "run-arm-stop: ARM_N must be a positive integer" >&2; exit 2 ;; \
+	esac
+	$(SCP) ./scripts/qnx-arm-stop.sh root@localhost:/tmp/qnx-arm-stop.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-arm-stop.sh'
+	n='$(ARM_N)'; \
+	for mode in calm flood; do \
+	  i=1; \
+	  while [ "$$i" -le "$$n" ]; do \
+	    log=$$(printf '$(ARM_DIR)/%s-%02d.log' "$$mode" "$$i"); \
+	    set +e; \
+	    bash scripts/watchdog.sh $(ARM_LIMIT_S) $$mode-$$i $(ARM_DIR) $(SSH) root@localhost "/tmp/qnx-arm-stop.sh $$mode $$i" > "$$log" 2>&1; \
+	    status=$$?; \
+	    set -e; \
+	    if [ "$$status" -ne 0 ]; then \
+	      echo "run-arm-stop: $$mode $$i exited $$status" >&2; \
+	      exit "$$status"; \
+	    fi; \
+	    i=$$((i + 1)); \
+	  done; \
+	done
+	/usr/bin/ruby scripts/arm_report.rb $(ARM_DIR)/calm-*.log $(ARM_DIR)/flood-*.log | tee $(ARM_DIR)/report.txt

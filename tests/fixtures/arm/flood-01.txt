@@ -1,0 +1,4 @@
+sink: arm model every 2000000 ns at priority 15, speed 250 mm/s, brake 1.25 m/s^2, home 199.5 mm from the eye
+sink: arm-stop event_ms 30057779 delay_ns 4100000 issue_to_brake_ns 1649008 speed_mm_s 250.0 reaction_mm 1.025 braking_mm 24.999 eye_event_mm 104.04 eye_brake_mm 103.42 eye_rest_mm 78.45 before_eye yes margin yes released no
+sink: arm model steps 856, period 2000000 ns, priority 15, step median 40 us, max 2654992 ns, over 1 ms 7, URGENT inside a step 1, person stops 1, state stops 0, stop reports 1
+late-check: late URGENT or COMMAND inside guest stalls 0, inside faults 0, outside 0
