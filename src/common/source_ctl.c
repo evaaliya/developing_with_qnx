@@ -1,5 +1,7 @@
 #include "source_ctl.h"
 
+#include "arm_model.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,6 +52,12 @@ static int copy_command(const char *text, char *out, size_t cap, int *empty)
 
 int source_ctl_apply(struct source_control *ctl, const char *text)
 {
+    return source_ctl_apply_at(ctl, text, 0);
+}
+
+int source_ctl_apply_at(struct source_control *ctl, const char *text,
+                        int64_t now_ns)
+{
     char cmd[64];
     int empty = 0;
 
@@ -75,6 +83,28 @@ int source_ctl_apply(struct source_control *ctl, const char *text)
         ctl->urgent_on = 1;
     } else if (strcmp(cmd, "stop") == 0) {
         ctl->stop = 1;
+    } else if (strcmp(cmd, "person in") == 0) {
+        if (!ctl->person_in) {
+            ctl->person_in = 1;
+            ctl->person_event_ns = now_ns;
+            ctl->wake |= SOURCE_WAKE_URGENT;
+        }
+    } else if (strcmp(cmd, "person out") == 0) {
+        if (ctl->person_in) {
+            ctl->person_in = 0;
+            ctl->person_event_ns = now_ns;
+            ctl->wake |= SOURCE_WAKE_URGENT;
+        }
+    } else if (strcmp(cmd, "arm eye") == 0) {
+        ctl->arm_plan = SOURCE_ARM_EYE;
+        ctl->wake |= SOURCE_WAKE_COMMAND;
+    } else if (strcmp(cmd, "arm home") == 0) {
+        ctl->arm_plan = SOURCE_ARM_HOME;
+        ctl->wake |= SOURCE_WAKE_COMMAND;
+    } else if (strcmp(cmd, "arm cycle") == 0) {
+        ctl->arm_plan = SOURCE_ARM_CYCLE;
+        ctl->cycle_to_eye = 1;
+        ctl->wake |= SOURCE_WAKE_COMMAND;
     } else {
         snprintf(ctl->error, sizeof ctl->error, "unknown command");
         return -1;
@@ -120,6 +150,8 @@ int source_ctl_status(const struct source_control *ctl, char *buf, size_t cap)
                      "flood %s\n"
                      "urgent %s\n"
                      "stop %s\n"
+                     "person %s\n"
+                     "arm %s\n"
                      "issued URGENT %llu\n"
                      "issued COMMAND %llu\n"
                      "issued BACKGROUND %llu\n"
@@ -129,6 +161,10 @@ int source_ctl_status(const struct source_control *ctl, char *buf, size_t cap)
                      ctl->flood ? "on" : "off",
                      ctl->urgent_on ? "on" : "off",
                      ctl->stop ? "yes" : "no",
+                     ctl->person_in ? "in" : "out",
+                     ctl->arm_plan == SOURCE_ARM_EYE     ? "eye"
+                     : ctl->arm_plan == SOURCE_ARM_CYCLE ? "cycle"
+                                                         : "home",
                      (unsigned long long)ctl->issued_urgent,
                      (unsigned long long)ctl->issued_command,
                      (unsigned long long)ctl->issued_background,
@@ -164,6 +200,84 @@ static int64_t period_of(uint32_t class_id)
     }
 }
 
+static int32_t to_mrad(double rad)
+{
+    double m = rad * 1000.0;
+
+    return (int32_t)(m < 0.0 ? m - 0.5 : m + 0.5);
+}
+
+void source_ctl_arm_payload(struct source_control *ctl, uint32_t class_id,
+                            struct signal_arm *out)
+{
+    int to_eye;
+
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof *out);
+    if (ctl == NULL) {
+        return;
+    }
+    if (class_id == SIGNAL_CLASS_URGENT) {
+        if (ctl->person_in) {
+            out->flags = SIGNAL_ARM_PERSON_IN;
+        }
+        out->event_ns = ctl->person_event_ns;
+        return;
+    }
+    if (class_id != SIGNAL_CLASS_COMMAND) {
+        return;
+    }
+    if (ctl->arm_plan == SOURCE_ARM_CYCLE) {
+        to_eye = ctl->cycle_to_eye;
+        ctl->cycle_to_eye = !ctl->cycle_to_eye;
+    } else {
+        to_eye = ctl->arm_plan == SOURCE_ARM_EYE;
+    }
+    out->flags = SIGNAL_ARM_TARGET;
+    if (to_eye) {
+        out->joint_mrad[0] = to_mrad(ARM_EYE_Q1);
+        out->joint_mrad[1] = to_mrad(ARM_EYE_Q2);
+        out->joint_mrad[2] = to_mrad(ARM_EYE_Q3);
+    } else {
+        out->joint_mrad[0] = to_mrad(ARM_HOME_Q1);
+        out->joint_mrad[1] = to_mrad(ARM_HOME_Q2);
+        out->joint_mrad[2] = to_mrad(ARM_HOME_Q3);
+    }
+}
+
+void source_schedule_restart(uint32_t class_id, int64_t now_ns,
+                             int64_t next_ns[3])
+{
+    int64_t period = period_of(class_id);
+
+    if (next_ns == NULL || period <= 0) {
+        return;
+    }
+    next_ns[class_id - 1] = add_period(now_ns, period);
+}
+
+/*
+ * The next time after a class was taken at now_ns: the previous time
+ * plus whole periods, the first one after now (D-081).
+ */
+static int64_t next_due(int64_t prev_ns, int64_t now_ns, int64_t period)
+{
+    int64_t next;
+
+    if (prev_ns <= 0 || period <= 0) {
+        return add_period(now_ns, period);
+    }
+    next = add_period(prev_ns, period);
+    if (next <= now_ns) {
+        int64_t behind = now_ns - prev_ns;
+
+        next = add_period(prev_ns, (behind / period + 1) * period);
+    }
+    return next;
+}
+
 uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
                               int64_t next_ns[3])
 {
@@ -184,10 +298,10 @@ uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
         if (class_id == SIGNAL_CLASS_URGENT && !ctl->urgent_on) {
             continue;
         }
-        if (now_ns < next_ns[index]) {
+        if (now_ns + SOURCE_TICK_NS / 2 < next_ns[index]) {
             continue;
         }
-        next_ns[index] = add_period(now_ns, period_of(class_id));
+        next_ns[index] = next_due(next_ns[index], now_ns, period_of(class_id));
         return class_id;
     }
     return 0;

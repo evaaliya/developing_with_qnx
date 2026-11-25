@@ -11,7 +11,8 @@ ntoaarch64-gcc "${CFLAGS[@]}" -o build/sink \
     src/sink/sink.c src/common/signal_msg.c src/common/net_state.c \
     src/common/signal_ledger.c src/common/issued_log.c \
     src/common/telemetry_snap.c src/common/telemetry_pub.c \
-    src/common/latency_stats.c src/common/node_store.c -lsocket
+    src/common/latency_stats.c src/common/node_store.c \
+    src/common/arm_model.c src/common/arm_drive.c -lsocket -lm
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/source \
     src/source/source.c src/common/signal_msg.c src/common/issue_order.c \
     src/common/issued_log.c src/common/source_ctl.c \

@@ -65,6 +65,8 @@ int main(void)
                   "flood off\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 0\n"
                   "issued COMMAND 0\n"
                   "issued BACKGROUND 0\n"
@@ -78,6 +80,8 @@ int main(void)
                   "flood on\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 0\n"
                   "issued COMMAND 0\n"
                   "issued BACKGROUND 0\n"
@@ -95,6 +99,8 @@ int main(void)
                   "flood off\n"
                   "urgent off\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 0\n"
                   "issued COMMAND 0\n"
                   "issued BACKGROUND 0\n"
@@ -114,6 +120,8 @@ int main(void)
                   "flood on\n"
                   "urgent off\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 0\n"
                   "issued COMMAND 0\n"
                   "issued BACKGROUND 0\n"
@@ -133,6 +141,8 @@ int main(void)
                   "flood off\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 2\n"
                   "issued COMMAND 1\n"
                   "issued BACKGROUND 3\n"
@@ -148,6 +158,8 @@ int main(void)
                   "flood off\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 2\n"
                   "issued COMMAND 1\n"
                   "issued BACKGROUND 3\n"
@@ -160,6 +172,8 @@ int main(void)
                   "flood off\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 2\n"
                   "issued COMMAND 1\n"
                   "issued BACKGROUND 3\n"
@@ -191,6 +205,8 @@ int main(void)
                   "flood off\n"
                   "urgent on\n"
                   "stop no\n"
+                  "person out\n"
+                  "arm home\n"
                   "issued URGENT 0\n"
                   "issued COMMAND 0\n"
                   "issued BACKGROUND 0\n"
@@ -383,6 +399,123 @@ int main(void)
                source_send_stuck(5000000000LL, 1000000000LL, 6000000000LL), 0);
     expect_int("stuck: negative limit",
                source_send_stuck(1000000000LL, 9000000000LL, -1), 0);
+
+    /* D-081: the next time is the previous time plus the period. */
+    {
+        int64_t nx[3] = { 0, 0, 0 };
+        int64_t now;
+        int issued = 0;
+        int64_t last = 0;
+        int64_t gap_max = 0;
+        int64_t gap_min = INT64_MAX;
+        int tick;
+
+        source_ctl_init(&ctl, 1);
+        /* Ticks 10 ms apart, each a little late by a varying amount. */
+        for (tick = 0; tick < 500; tick++) {
+            uint32_t got;
+
+            now = (int64_t)tick * SOURCE_TICK_NS + (int64_t)((tick * 37) % 900) * 1000;
+            while ((got = source_schedule_take(&ctl, now, nx)) != 0) {
+                if (got == SIGNAL_CLASS_URGENT) {
+                    if (issued > 0) {
+                        int64_t g = now - last;
+
+                        if (g > gap_max) {
+                            gap_max = g;
+                        }
+                        if (g < gap_min) {
+                            gap_min = g;
+                        }
+                    }
+                    last = now;
+                    issued++;
+                }
+            }
+        }
+        /* 5 s of ticks: one URGENT every 20 ms, none every 30 ms. */
+        expect_int("drift: 250 URGENT in 500 ticks", issued, 250);
+        expect_int("drift: no gap of three ticks", gap_max < 25000000LL, 1);
+        expect_int("drift: no gap of one tick", gap_min > 15000000LL, 1);
+
+        nx[0] = 100000000LL;
+        expect_u32("due half a tick early",
+                   source_schedule_take(&ctl, 100000000LL - SOURCE_TICK_NS / 2,
+                                        nx), SIGNAL_CLASS_URGENT);
+        expect_int("next is previous plus period", nx[0] == 120000000LL, 1);
+        expect_u32("not due more than half a tick early",
+                   source_schedule_take(&ctl, 120000000LL - SOURCE_TICK_NS / 2 - 1,
+                                        nx), 0);
+        nx[0] = 100000000LL;
+        nx[1] = INT64_MAX;
+        nx[2] = INT64_MAX;
+        expect_u32("late by many periods is one signal",
+                   source_schedule_take(&ctl, 172000000LL, nx),
+                   SIGNAL_CLASS_URGENT);
+        expect_int("missed times are skipped, phase kept", nx[0] == 180000000LL,
+                   1);
+        expect_u32("no burst after the skip",
+                   source_schedule_take(&ctl, 172000000LL, nx), 0);
+        source_schedule_restart(SIGNAL_CLASS_COMMAND, 1000, nx);
+        expect_int("restart command schedule",
+                   nx[1] == 1000 + SOURCE_COMMAND_PERIOD_NS, 1);
+    }
+
+    /* D-080: the zone sensor and the arm plan. */
+    {
+        struct signal_arm arm;
+
+        source_ctl_init(&ctl, 1);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_URGENT, &arm);
+        expect_u32("nobody in the zone", arm.flags, 0);
+        expect_int("person in", source_ctl_apply_at(&ctl, "person in", 777), 0);
+        expect_u32("person in wakes URGENT", ctl.wake, SOURCE_WAKE_URGENT);
+        expect_int("event time kept", ctl.person_event_ns == 777, 1);
+        ctl.wake = 0;
+        expect_int("person in again", source_ctl_apply_at(&ctl, "person in", 999),
+                   0);
+        expect_u32("a repeat wakes nothing", ctl.wake, 0);
+        expect_int("a repeat keeps the first event", ctl.person_event_ns == 777,
+                   1);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_URGENT, &arm);
+        expect_u32("URGENT says person in", arm.flags, SIGNAL_ARM_PERSON_IN);
+        expect_int("URGENT carries the event", arm.event_ns == 777, 1);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_BACKGROUND, &arm);
+        expect_u32("BACKGROUND carries nothing", arm.flags, 0);
+        expect_int("person out", source_ctl_apply_at(&ctl, "person out\n", 1500),
+                   0);
+        expect_u32("person out wakes URGENT", ctl.wake, SOURCE_WAKE_URGENT);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_URGENT, &arm);
+        expect_u32("URGENT says nobody", arm.flags, 0);
+        ctl.wake = 0;
+        expect_int("person out again", source_ctl_apply(&ctl, "person out"), 0);
+        expect_u32("out again wakes nothing", ctl.wake, 0);
+
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);
+        expect_u32("COMMAND has a target", arm.flags, SIGNAL_ARM_TARGET);
+        expect_int("default plan is home", arm.joint_mrad[0], -100);
+        expect_int("arm eye", source_ctl_apply(&ctl, "arm eye"), 0);
+        expect_u32("arm eye wakes COMMAND", ctl.wake, SOURCE_WAKE_COMMAND);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);
+        expect_int("eye joint 1", arm.joint_mrad[0], 300);
+        expect_int("eye joint 2", arm.joint_mrad[1], 1200);
+        expect_int("eye joint 3", arm.joint_mrad[2], 500);
+        expect_int("arm cycle", source_ctl_apply(&ctl, "arm cycle"), 0);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);
+        expect_int("cycle starts at the eye", arm.joint_mrad[1], 1200);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);
+        expect_int("cycle then home", arm.joint_mrad[1], 1600);
+        source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);
+        expect_int("cycle then eye", arm.joint_mrad[1], 1200);
+        expect_int("unknown arm command", source_ctl_apply(&ctl, "arm up"), -1);
+        source_ctl_arm_payload(NULL, SIGNAL_CLASS_COMMAND, &arm);
+        expect_u32("NULL ctl carries nothing", arm.flags, 0);
+
+        source_ctl_init(&ctl, 0);
+        expect_int("burst ignores person in", source_ctl_apply(&ctl, "person in"),
+                   -1);
+        expect_int("burst person stays out", ctl.person_in, 0);
+    }
 
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);

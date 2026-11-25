@@ -24,6 +24,24 @@ enum signal_verdict {
 /* Stamps a relay adds. The sink turns neighbours into per-hop times. */
 #define SIGNAL_MAX_HOPS 4
 
+/*
+ * What a signal says about the arm (D-080). URGENT carries the zone
+ * sensor: SIGNAL_ARM_PERSON_IN while a person is in the zone, with the
+ * time source took the "person in" event. COMMAND carries joint targets
+ * in milliradians with SIGNAL_ARM_TARGET. A counted burst and BACKGROUND
+ * carry no flags, and the sink ignores them for the arm.
+ */
+#define SIGNAL_ARM_PERSON_IN 1u
+#define SIGNAL_ARM_TARGET 2u
+/* Set on an URGENT issued at once for a zone change, not by the schedule. */
+#define SIGNAL_ARM_EVENT 4u
+
+struct signal_arm {
+    uint32_t flags;
+    int32_t joint_mrad[3];
+    int64_t event_ns;
+};
+
 struct signal {
     uint64_t number;
     uint32_t class_id;
@@ -31,6 +49,7 @@ struct signal {
     int64_t issued_ns;
     int64_t deadline_ns;
     int64_t hop_ns[SIGNAL_MAX_HOPS];
+    struct signal_arm arm;
 };
 
 /*

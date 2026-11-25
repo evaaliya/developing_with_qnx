@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "arm_drive.h"
 #include "issued_log.h"
 #include "net_state.h"
 #include "node_store.h"
@@ -11,6 +12,8 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +39,30 @@ static enum net_state current_state = NET_INIT;
 static int books_reset;
 static struct telem_window hop_window[3];
 static int telemetry_on;
+
+/*
+ * The arm (D-080). The receive thread writes g_arm_link with plain
+ * atomic stores and never waits for the model thread; the model thread
+ * owns g_drive. The model runs at ARM_MODEL_PRIO on CPU 0: below URGENT
+ * (30) and COMMAND (20), so a signal received there preempts it, and
+ * above the BACKGROUND flood (12), so the arm keeps moving under it.
+ */
+#define ARM_MODEL_PRIO 15
+#define ARM_MODEL_STEP_NS 2000000LL
+/* One arm telemetry report every this many steps (50 ms). */
+#define ARM_TELEM_EVERY 25
+/* Step costs in microseconds; the last bucket is 1000 us or more. */
+#define ARM_COST_BUCKETS 1001
+
+static struct arm_link g_arm_link;
+static struct arm_drive g_drive;
+static int g_arm_on;
+static int g_arm_busy;
+static unsigned g_arm_steps;
+static unsigned g_arm_cost_us[ARM_COST_BUCKETS];
+static int64_t g_arm_cost_max_ns;
+static unsigned g_arm_urgent_in_step;
+static unsigned g_arm_reports;
 
 /* Whole-run totals are kept by the ledger; no pass over the ring (D-062). */
 static void class_counts(const struct signal_ledger *ledger, uint32_t id,
@@ -194,9 +221,21 @@ static long long run_ms(void)
     return (long long)(monotonic_ns() / 1000000LL);
 }
 
+/* NORMAL, DEGRADED and RECOVERING let the arm move; others brake it. */
+static int state_lets_arm_move(enum net_state state)
+{
+    return state == NET_NORMAL || state == NET_DEGRADED ||
+           state == NET_RECOVERING;
+}
+
 static void show_state(enum net_state *shown, enum net_state now)
 {
+    int ok = state_lets_arm_move(now);
+
     current_state = now;
+    if (ok != __atomic_load_n(&g_arm_link.state_ok, __ATOMIC_RELAXED)) {
+        arm_link_on_state(&g_arm_link, ok, monotonic_ns());
+    }
     if (*shown != now) {
         *shown = now;
         if (signal_log_quiet()) {
@@ -240,6 +279,44 @@ static void print_signal(const struct signal *sig, enum signal_verdict verdict,
     fflush(stdout);
 }
 
+/* Median step cost in microseconds from the histogram. */
+static unsigned arm_cost_median_us(unsigned steps)
+{
+    unsigned seen = 0;
+    unsigned i;
+
+    for (i = 0; i < ARM_COST_BUCKETS; i++) {
+        seen += g_arm_cost_us[i];
+        if (seen * 2 >= steps) {
+            return i;
+        }
+    }
+    return ARM_COST_BUCKETS - 1;
+}
+
+/*
+ * Read without a lock while the model may still step: a count may be
+ * one step behind. The line shows that the model does not hold URGENT
+ * up: its step cost and how many URGENT arrived inside a step (D-080).
+ */
+static void print_arm_summary(void)
+{
+    unsigned steps = __atomic_load_n(&g_arm_steps, __ATOMIC_RELAXED);
+
+    if (!g_arm_on) {
+        printf("sink: arm model off (SIGNAL_ARM=0)\n");
+        return;
+    }
+    printf("sink: arm model steps %u, period %lld ns, priority %d, step median "
+           "%u us, max %lld ns, over 1 ms %u, URGENT inside a step %u, person "
+           "stops %u, state stops %u, stop reports %u\n",
+           steps, (long long)ARM_MODEL_STEP_NS, ARM_MODEL_PRIO,
+           steps > 0 ? arm_cost_median_us(steps) : 0,
+           (long long)g_arm_cost_max_ns,
+           g_arm_cost_us[ARM_COST_BUCKETS - 1], g_arm_urgent_in_step,
+           g_drive.person_stops, g_drive.state_stops, g_arm_reports);
+}
+
 static void print_summary(const struct signal_ledger *ledger)
 {
     static const uint32_t classes[] = {
@@ -264,6 +341,7 @@ static void print_summary(const struct signal_ledger *ledger)
                signal_class_name(id), received, on_time, late, lost, dropped);
     }
     printf("sink: unaccounted %u\n", signal_ledger_unaccounted(ledger));
+    print_arm_summary();
     fflush(stdout);
     publish_sink(ledger, current_state, 1);
 }
@@ -400,6 +478,153 @@ static struct signal_ledger *open_books(int resume)
     return ledger;
 }
 
+/* One finished stop as one line, written whole without the stdio lock. */
+static void write_stop(const struct arm_stop_report *r)
+{
+    char line[512];
+    int n;
+
+    n = snprintf(line, sizeof line,
+                 "sink: arm-stop event_ms %lld delay_ns %lld issue_to_brake_ns "
+                 "%lld speed_mm_s %.1f reaction_mm %.3f braking_mm %.3f "
+                 "eye_event_mm %.2f eye_brake_mm %.2f eye_rest_mm %.2f "
+                 "before_eye %s margin %s released %s\n",
+                 (long long)(r->event_ns / 1000000LL),
+                 (long long)(r->brake_ns - r->event_ns),
+                 (long long)(r->brake_ns - r->issued_ns), r->speed_m_s * 1000.0,
+                 r->reaction_m * 1000.0, r->braking_m * 1000.0,
+                 r->eye_at_event_m * 1000.0, r->eye_at_brake_m * 1000.0,
+                 r->eye_at_stop_m * 1000.0, r->before_eye ? "yes" : "no",
+                 r->in_margin ? "yes" : "no", r->released_early ? "yes" : "no");
+    if (n > 0 && (size_t)n < sizeof line) {
+        (void)write(STDOUT_FILENO, line, (size_t)n);
+    }
+}
+
+static void publish_arm(void)
+{
+    struct telem_arm a;
+    char buf[TELEM_REPORT_CAP];
+    double speed = g_drive.arm.speed;
+    double eye = arm_eye_distance(g_drive.arm.q);
+    int i;
+    int n;
+
+    if (!telemetry_on) {
+        return;
+    }
+    memset(&a, 0, sizeof a);
+    a.have = 1;
+    a.brake = g_drive.arm.brake;
+    a.person = __atomic_load_n(&g_arm_link.person_in, __ATOMIC_RELAXED);
+    for (i = 0; i < ARM_JOINTS; i++) {
+        double m = g_drive.arm.q[i] * 1000.0;
+
+        a.q_mrad[i] = (int32_t)(m < 0.0 ? m - 0.5 : m + 0.5);
+    }
+    a.eye_um = (uint32_t)(eye * 1e6 + 0.5);
+    a.speed_um_s = (uint32_t)(speed * 1e6 + 0.5);
+    a.person_stops = g_drive.person_stops;
+    n = telem_report_arm(buf, sizeof buf, &a);
+    if (n > 0) {
+        telem_pub_post_aux(buf, (size_t)n);
+    }
+}
+
+/*
+ * The arm model on a fixed 2 ms step (D-080). Absolute wake times, so
+ * the step does not drift. Physics uses the brake time the receive
+ * thread stamped, not the step time, so a late step only catches up.
+ */
+static void *arm_thread(void *arg)
+{
+    struct sched_param param;
+    struct timespec next;
+    int64_t next_ns;
+
+    (void)arg;
+    if (ThreadCtl(_NTO_TCTL_RUNMASK, (void *)(uintptr_t)1) == -1) {
+        fprintf(stderr, "sink: pinning the arm thread to CPU 0 failed: %s\n",
+                strerror(errno));
+    }
+    memset(&param, 0, sizeof param);
+    param.sched_priority = ARM_MODEL_PRIO;
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+        fprintf(stderr, "sink: the arm thread could not take priority %d\n",
+                ARM_MODEL_PRIO);
+    }
+    next_ns = monotonic_ns();
+    for (;;) {
+        struct arm_link_view view;
+        struct arm_stop_report report;
+        int64_t t0;
+        int64_t cost;
+        int done;
+        unsigned us;
+
+        next_ns += ARM_MODEL_STEP_NS;
+        next.tv_sec = (time_t)(next_ns / 1000000000LL);
+        next.tv_nsec = (long)(next_ns % 1000000000LL);
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL) ==
+               EINTR) {
+        }
+        __atomic_store_n(&g_arm_busy, 1, __ATOMIC_RELAXED);
+        t0 = monotonic_ns();
+        arm_link_read(&g_arm_link, &view);
+        done = arm_drive_update(&g_drive, &view, t0, &report);
+        cost = monotonic_ns() - t0;
+        __atomic_store_n(&g_arm_busy, 0, __ATOMIC_RELAXED);
+        us = (unsigned)(cost / 1000);
+        if (us >= ARM_COST_BUCKETS) {
+            us = ARM_COST_BUCKETS - 1;
+        }
+        g_arm_cost_us[us]++;
+        if (cost > g_arm_cost_max_ns) {
+            g_arm_cost_max_ns = cost;
+        }
+        __atomic_store_n(&g_arm_steps, g_arm_steps + 1, __ATOMIC_RELAXED);
+        if (done) {
+            g_arm_reports++;
+            write_stop(&report);
+        }
+        if (g_arm_steps % ARM_TELEM_EVERY == 0) {
+            publish_arm();
+        }
+        /* A step that overran its period starts the next from now. */
+        if (monotonic_ns() > next_ns + ARM_MODEL_STEP_NS) {
+            next_ns = monotonic_ns();
+        }
+    }
+    return NULL;
+}
+
+static void start_arm(void)
+{
+    const char *off = getenv("SIGNAL_ARM");
+    pthread_t thread;
+    int rc;
+
+    arm_link_init(&g_arm_link);
+    arm_drive_init(&g_drive, monotonic_ns());
+    if (off != NULL && strcmp(off, "0") == 0) {
+        printf("sink: arm model off (SIGNAL_ARM=0)\n");
+        fflush(stdout);
+        return;
+    }
+    rc = pthread_create(&thread, NULL, arm_thread, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "sink: the arm thread did not start: %s; the run goes "
+                "on without the arm\n", strerror(rc));
+        return;
+    }
+    g_arm_on = 1;
+    printf("sink: arm model every %lld ns at priority %d, speed %.0f mm/s, "
+           "brake %.2f m/s^2, home %.1f mm from the eye\n",
+           (long long)ARM_MODEL_STEP_NS, ARM_MODEL_PRIO, ARM_SPEED_M_S * 1000.0,
+           ARM_DECEL_M_S2, arm_eye_distance(g_drive.arm.q) * 1000.0);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
     name_attach_t *attach;
@@ -458,6 +683,7 @@ int main(int argc, char **argv)
     }
 
     ledger = open_books(resume);
+    start_arm();
     gap_ns = (int64_t)gap_ms * 1000000LL;
     net_machine_init(&machine, monotonic_ns(), gap_ns, NET_RECOVER_URGENT_NEED);
     {
@@ -703,6 +929,19 @@ int main(int argc, char **argv)
         }
 
         now_ns = monotonic_ns();
+        /*
+         * The brake engages here, before the reply: an atomic store, no
+         * lock, no print (D-080). A late zone URGENT still brakes.
+         */
+        if (buffer.body.message.body.class_id == SIGNAL_CLASS_URGENT) {
+            if (__atomic_load_n(&g_arm_busy, __ATOMIC_RELAXED)) {
+                g_arm_urgent_in_step++;
+            }
+            (void)arm_link_on_urgent(&g_arm_link, &buffer.body.message.body,
+                                     now_ns);
+        } else if (buffer.body.message.body.class_id == SIGNAL_CLASS_COMMAND) {
+            arm_link_on_command(&g_arm_link, &buffer.body.message.body);
+        }
         verdict = signal_check(&buffer.body.message.body, now_ns);
         if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
             fprintf(stderr, "sink: replying to the sender failed: %s\n",

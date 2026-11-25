@@ -43,6 +43,16 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_issue_lock = PTHREAD_MUTEX_INITIALIZER;
 static dispatch_t *g_dpp;
 
+/*
+ * Pulses to the timer thread. A zone change and an arm command are
+ * issued at once, not on the next schedule time (D-080). The zone pulse
+ * comes at URGENT priority, the arm pulse at COMMAND priority.
+ */
+#define PULSE_TICK _PULSE_CODE_MINAVAIL
+#define PULSE_ZONE (_PULSE_CODE_MINAVAIL + 1)
+#define PULSE_ARM (_PULSE_CODE_MINAVAIL + 2)
+static int g_timer_coid = -1;
+
 static void ctl_lock(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -271,7 +281,8 @@ static int load_issued(struct issued_item *items, unsigned *count,
     return 0;
 }
 
-static int send_one(int coid, uint64_t number, uint32_t class_id);
+static int send_one(int coid, uint64_t number, uint32_t class_id,
+                    const struct signal_arm *arm);
 
 static int send_recorded(int coid, struct signal_manifest *manifest,
                          unsigned long *recorded, uint64_t *number,
@@ -281,7 +292,7 @@ static int send_recorded(int coid, struct signal_manifest *manifest,
         pause_gap(gap_ms);
     }
     if (*recorded >= SIGNAL_MANIFEST_CAP ||
-        send_one(coid, *number, class_id) != 0) {
+        send_one(coid, *number, class_id, NULL) != 0) {
         return -1;
     }
     ctl_lock();
@@ -295,7 +306,8 @@ static int send_recorded(int coid, struct signal_manifest *manifest,
     return 0;
 }
 
-static int send_one(int coid, uint64_t number, uint32_t class_id)
+static int send_one(int coid, uint64_t number, uint32_t class_id,
+                    const struct signal_arm *arm)
 {
     struct signal_message message;
     struct signal_reply reply;
@@ -317,6 +329,9 @@ static int send_one(int coid, uint64_t number, uint32_t class_id)
     message.body.class_id = class_id;
     message.body.issued_ns = monotonic_ns();
     message.body.deadline_ns = signal_class_deadline_ns(class_id);
+    if (arm != NULL) {
+        message.body.arm = *arm;
+    }
     if (message.body.deadline_ns < 0) {
         fprintf(stderr, "source: class %u has no deadline\n", class_id);
         return -1;
@@ -472,15 +487,34 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
     }
     text[nbytes] = '\0';
 
-    ctl_lock();
-    status = source_ctl_apply(&g_ctl, text);
-    if (status == 0) {
-        /* A restarted source takes this mode back (D-065). */
-        live_book_set_mode(g_mode_book, g_ctl.flood, g_ctl.urgent_on);
-    }
-    ctl_unlock();
-    if (status != 0) {
-        return EINVAL;
+    {
+        /* The event time of "person in" is when the sensor said so. */
+        int64_t now = monotonic_ns();
+        unsigned wake;
+
+        ctl_lock();
+        g_ctl.wake = 0;
+        status = source_ctl_apply_at(&g_ctl, text, now);
+        if (status == 0) {
+            /* A restarted source takes this mode back (D-065). */
+            live_book_set_mode(g_mode_book, g_ctl.flood, g_ctl.urgent_on);
+        }
+        wake = g_ctl.wake;
+        g_ctl.wake = 0;
+        ctl_unlock();
+        if (status != 0) {
+            return EINVAL;
+        }
+        if ((wake & SOURCE_WAKE_URGENT) != 0 && g_timer_coid != -1 &&
+            MsgSendPulse(g_timer_coid, SIGNAL_PRIO_URGENT, PULSE_ZONE, 0) == -1) {
+            fprintf(stderr, "source: waking the timer thread for the zone "
+                    "failed: %s\n", strerror(errno));
+        }
+        if ((wake & SOURCE_WAKE_COMMAND) != 0 && g_timer_coid != -1 &&
+            MsgSendPulse(g_timer_coid, SIGNAL_PRIO_COMMAND, PULSE_ARM, 0) == -1) {
+            fprintf(stderr, "source: waking the timer thread for the arm "
+                    "failed: %s\n", strerror(errno));
+        }
     }
     publish_source(0);
     _IO_SET_WRITE_NBYTES(ctp, nbytes);
@@ -715,8 +749,9 @@ static void try_reopen(void)
  * number goes on the book before the send, so a death in the send
  * leaves it to be closed (D-063).
  */
-static int issue_live(uint32_t class_id)
+static int issue_live(uint32_t class_id, uint32_t extra_flags)
 {
+    struct signal_arm arm;
     uint64_t number;
     int coid;
     int rc;
@@ -734,7 +769,9 @@ static int issue_live(uint32_t class_id)
     }
     ctl_lock();
     source_ctl_note_issued(&g_ctl, class_id);
+    source_ctl_arm_payload(&g_ctl, class_id, &arm);
     ctl_unlock();
+    arm.flags |= extra_flags;
     coid = g_live.coid;
     /*
      * The number is on the book. Release the lock before the send, as the
@@ -744,7 +781,7 @@ static int issue_live(uint32_t class_id)
      */
     pthread_mutex_unlock(&g_issue_lock);
     __atomic_store_n(&g_timer_send_since_ns, monotonic_ns(), __ATOMIC_RELEASE);
-    rc = send_one(coid, number, class_id);
+    rc = send_one(coid, number, class_id, &arm);
     __atomic_store_n(&g_timer_send_since_ns, 0, __ATOMIC_RELEASE);
     if (rc == 1) {
         char what[96];
@@ -1357,8 +1394,7 @@ static int run_live(int argc, char **argv)
      * (10) the timer thread never ran while BACKGROUND work at 12 kept
      * CPU 0 busy, and URGENT stopped being issued (D-060).
      */
-    SIGEV_PULSE_INIT(&event, timer_coid, SIGNAL_PRIO_URGENT,
-                     _PULSE_CODE_MINAVAIL, 0);
+    SIGEV_PULSE_INIT(&event, timer_coid, SIGNAL_PRIO_URGENT, PULSE_TICK, 0);
     if (MsgRegisterEvent(&event, timer_coid) == -1) {
         fprintf(stderr, "source: registering the timer pulse failed: %s\n",
                 strerror(errno));
@@ -1380,6 +1416,7 @@ static int run_live(int argc, char **argv)
         name_close(coid);
         return EXIT_FAILURE;
     }
+    g_timer_coid = timer_coid;
     printf("source: timer pulse every %lld ns, URGENT %lld ns, "
            "COMMAND %lld ns, BACKGROUND %lld ns\n",
            (long long)SOURCE_TICK_NS,
@@ -1469,10 +1506,35 @@ static int run_live(int argc, char **argv)
             }
             continue;
         }
-        if (pulse.code != _PULSE_CODE_MINAVAIL) {
+        if (pulse.code != PULSE_TICK && pulse.code != PULSE_ZONE &&
+            pulse.code != PULSE_ARM) {
             continue;
         }
         try_reopen();
+        if (pulse.code == PULSE_ZONE || pulse.code == PULSE_ARM) {
+            /*
+             * "person in" or "person out": the zone URGENT goes now, not
+             * on the next tick; the schedule keeps its times. An arm
+             * command: its COMMAND goes now and the COMMAND schedule
+             * starts again from now (D-080).
+             */
+            uint32_t class_id = pulse.code == PULSE_ZONE ? SIGNAL_CLASS_URGENT
+                                                         : SIGNAL_CLASS_COMMAND;
+            int issued = issue_live(class_id, pulse.code == PULSE_ZONE
+                                                  ? SIGNAL_ARM_EVENT : 0);
+
+            if (issued < 0) {
+                failed = 1;
+                break;
+            }
+            if (class_id == SIGNAL_CLASS_COMMAND) {
+                ctl_lock();
+                source_schedule_restart(SIGNAL_CLASS_COMMAND, monotonic_ns(),
+                                        next_ns);
+                ctl_unlock();
+            }
+            continue;
+        }
 
         ctl_lock();
         stop = g_ctl.stop;
@@ -1500,7 +1562,7 @@ static int run_live(int argc, char **argv)
                     break;
                 }
                 {
-                    int issued = issue_live(class_id);
+                    int issued = issue_live(class_id, 0);
 
                     if (issued < 0) {
                         failed = 1;

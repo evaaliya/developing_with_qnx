@@ -41,11 +41,32 @@
  */
 #define SOURCE_FLOOD_RESERVE 2048u
 
+/* What the planner sends the arm in COMMAND (D-080). */
+enum source_arm_plan {
+    SOURCE_ARM_HOME = 0,
+    SOURCE_ARM_EYE = 1,
+    /* Eye and home in turn, one leg per COMMAND. */
+    SOURCE_ARM_CYCLE = 2
+};
+
+/* Set by a command that must be issued now, not on the next schedule time. */
+#define SOURCE_WAKE_URGENT 1u
+#define SOURCE_WAKE_COMMAND 2u
+
 struct source_control {
     int live;
     int flood;
     int urgent_on;
     int stop;
+    /* The zone sensor: 1 while a person is in the zone (D-080). */
+    int person_in;
+    /* When the "person in" now in force arrived (CLOCK_MONOTONIC ns). */
+    int64_t person_event_ns;
+    enum source_arm_plan arm_plan;
+    /* In the cycle plan, 1 when the next COMMAND goes to the eye. */
+    int cycle_to_eye;
+    /* SOURCE_WAKE_* from the last command; the caller clears it. */
+    unsigned wake;
     uint64_t issued_urgent;
     uint64_t issued_command;
     uint64_t issued_background;
@@ -58,6 +79,24 @@ void source_ctl_init(struct source_control *ctl, int live);
  * than error are unchanged. A NULL ctl is rejected. */
 int source_ctl_apply(struct source_control *ctl, const char *text);
 
+/*
+ * The same, with the time the command arrived: "person in" keeps it as
+ * the event time (D-080). "person in" while a person is already in, and
+ * "person out" while nobody is, change nothing and wake nothing. Zone
+ * commands set SOURCE_WAKE_URGENT, arm commands SOURCE_WAKE_COMMAND.
+ */
+int source_ctl_apply_at(struct source_control *ctl, const char *text,
+                        int64_t now_ns);
+
+/*
+ * The arm part of the next signal of class_id. URGENT: the zone sensor.
+ * COMMAND: the joint target of the plan; the cycle plan turns to the
+ * other leg each time. Other classes carry nothing. A NULL ctl or out
+ * leaves out zeroed when out is given.
+ */
+void source_ctl_arm_payload(struct source_control *ctl, uint32_t class_id,
+                            struct signal_arm *out);
+
 void source_ctl_note_issued(struct source_control *ctl, uint32_t class_id);
 
 /* Bytes written, excluding the NUL. -1 when the buffer is too small. */
@@ -65,12 +104,20 @@ int source_ctl_status(const struct source_control *ctl, char *buf, size_t cap);
 
 /*
  * The class to send now, most urgent first. 0 when none is due.
- * Advances that class's next time to now + its period. A muted URGENT
- * is skipped and its next time stays, so restore does not wait out a
- * period that already passed. next_ns is indexed by class id - 1.
+ * A class is due on the tick nearest its time: now + half a tick has
+ * reached it. Its next time is the previous time plus its period, so
+ * the schedule does not drift with the tick (D-081); times already
+ * passed by more than a period are skipped, not caught up in a burst.
+ * The first time (next 0) starts the schedule at now + period. A muted
+ * URGENT is skipped and its next time stays, so restore does not wait
+ * out a period that already passed. next_ns is indexed by class id - 1.
  */
 uint32_t source_schedule_take(const struct source_control *ctl, int64_t now_ns,
                               int64_t next_ns[3]);
+
+/* The class starts its schedule again: its next time is now + period. */
+void source_schedule_restart(uint32_t class_id, int64_t now_ns,
+                             int64_t next_ns[3]);
 
 /* BACKGROUND signals to put in the next batch. 0 when flood is off,
  * the clock is missing, or the period has not elapsed. When a batch is
