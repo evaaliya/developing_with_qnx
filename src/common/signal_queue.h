@@ -73,6 +73,29 @@ int signal_queue_top_priority(const struct signal_queue *q);
 
 size_t signal_queue_count(const struct signal_queue *q);
 
+/*
+ * The relay has a forward thread for URGENT and one for the other
+ * classes (D-074). These take part of the queue in the same order as
+ * signal_queue_pop.
+ *
+ * signal_queue_pop_class: the item of class_id that leaves first.
+ * signal_queue_pop_except, signal_queue_repick_except,
+ * signal_queue_top_priority_except: as signal_queue_pop,
+ * signal_queue_repick and signal_queue_top_priority, over the items
+ * whose class is not skip_class.
+ * Return values as the plain calls; an empty selection is -1 for pop
+ * and top priority and 0 for repick.
+ */
+int signal_queue_pop_class(struct signal_queue *q, uint32_t class_id,
+                           struct signal_queue_item *out);
+int signal_queue_pop_except(struct signal_queue *q, uint32_t skip_class,
+                            struct signal_queue_item *out);
+int signal_queue_repick_except(struct signal_queue *q, uint32_t skip_class,
+                               struct signal_queue_item *held);
+int signal_queue_top_priority_except(const struct signal_queue *q,
+                                     uint32_t skip_class);
+size_t signal_queue_count_class(const struct signal_queue *q, uint32_t class_id);
+
 /* NULL when q is NULL or index is past the end. Order is storage order. */
 const struct signal_queue_item *signal_queue_item(const struct signal_queue *q,
                                                   size_t index);

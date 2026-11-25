@@ -427,6 +427,68 @@ int main(void)
         expect_u64("the next command is still first", item.body.number, 2);
     }
 
+    /*
+     * The URGENT forward thread takes only URGENT, the other forward
+     * thread everything else (D-074).
+     */
+    signal_queue_init(&q);
+    push(&q, 1, SIGNAL_CLASS_URGENT, 10, 1);
+    push(&q, 2, SIGNAL_CLASS_BACKGROUND, 11, 2);
+    push(&q, 3, SIGNAL_CLASS_COMMAND, 12, 3);
+    push(&q, 4, SIGNAL_CLASS_URGENT, 5, 4);
+    expect_int("count of URGENT", (int)signal_queue_count_class(&q, SIGNAL_CLASS_URGENT), 2);
+    expect_int("count of COMMAND", (int)signal_queue_count_class(&q, SIGNAL_CLASS_COMMAND), 1);
+    expect_int("count of a null queue", (int)signal_queue_count_class(NULL, SIGNAL_CLASS_URGENT), 0);
+    expect_int("top priority except URGENT is COMMAND",
+               signal_queue_top_priority_except(&q, SIGNAL_CLASS_URGENT),
+               SIGNAL_PRIO_COMMAND);
+    expect_int("pop except URGENT", signal_queue_pop_except(&q, SIGNAL_CLASS_URGENT, &item), 0);
+    expect_u64("pop except URGENT takes the COMMAND", item.body.number, 3);
+    expect_int("pop except URGENT again", signal_queue_pop_except(&q, SIGNAL_CLASS_URGENT, &item), 0);
+    expect_u64("then the BACKGROUND", item.body.number, 2);
+    expect_int("pop except URGENT with only URGENT left",
+               signal_queue_pop_except(&q, SIGNAL_CLASS_URGENT, &item), -1);
+    expect_int("top priority except URGENT with only URGENT left",
+               signal_queue_top_priority_except(&q, SIGNAL_CLASS_URGENT), -1);
+    expect_int("the two URGENT stay", (int)signal_queue_count(&q), 2);
+    expect_int("pop URGENT class", signal_queue_pop_class(&q, SIGNAL_CLASS_URGENT, &item), 0);
+    expect_u64("the earlier URGENT arrival first", item.body.number, 4);
+    expect_int("pop URGENT class again", signal_queue_pop_class(&q, SIGNAL_CLASS_URGENT, &item), 0);
+    expect_u64("then the later URGENT", item.body.number, 1);
+    expect_int("pop URGENT class on an empty queue",
+               signal_queue_pop_class(&q, SIGNAL_CLASS_URGENT, &item), -1);
+    expect_int("null pop class", signal_queue_pop_class(NULL, SIGNAL_CLASS_URGENT, &item), -1);
+    expect_int("null pop except", signal_queue_pop_except(&q, SIGNAL_CLASS_URGENT, NULL), -1);
+
+    /* Same arrival time: the arrival order decides, for both. */
+    signal_queue_init(&q);
+    push(&q, 7, SIGNAL_CLASS_URGENT, 20, 9);
+    push(&q, 8, SIGNAL_CLASS_URGENT, 20, 8);
+    expect_int("pop class same time", signal_queue_pop_class(&q, SIGNAL_CLASS_URGENT, &item), 0);
+    expect_u64("pop class same time takes the smaller order", item.body.number, 8);
+
+    /* A held BACKGROUND is exchanged for a COMMAND, never for an URGENT. */
+    {
+    struct signal_queue_item held;
+
+    signal_queue_init(&q);
+    push(&q, 20, SIGNAL_CLASS_URGENT, 1, 1);
+    memset(&held, 0, sizeof held);
+    held.body = make_signal(21, SIGNAL_CLASS_BACKGROUND);
+    held.arrival_ns = 2;
+    held.arrival_order = 2;
+    expect_int("repick except URGENT with only URGENT waiting",
+               signal_queue_repick_except(&q, SIGNAL_CLASS_URGENT, &held), 0);
+    expect_u64("still holds the BACKGROUND", held.body.number, 21);
+    push(&q, 22, SIGNAL_CLASS_COMMAND, 3, 3);
+    expect_int("repick except URGENT with a COMMAND waiting",
+               signal_queue_repick_except(&q, SIGNAL_CLASS_URGENT, &held), 1);
+    expect_u64("now holds the COMMAND", held.body.number, 22);
+    expect_int("the BACKGROUND went back", contains_number(&q, 21), 1);
+    expect_int("the URGENT is still there", contains_number(&q, 20), 1);
+    expect_int("null repick except", signal_queue_repick_except(NULL, SIGNAL_CLASS_URGENT, &held), -1);
+    }
+
     signal_queue_init(&q);
     expect_int("null repick queue", signal_queue_repick(NULL, &item), -1);
     expect_int("null repick held", signal_queue_repick(&q, NULL), -1);

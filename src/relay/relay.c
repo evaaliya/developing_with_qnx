@@ -46,6 +46,15 @@ struct relay {
     int own_priority;
     pthread_t forward;
     int forward_prio;
+    /*
+     * URGENT has its own forward thread, so it never waits for a
+     * COMMAND or BACKGROUND send that has already begun (D-074).
+     * urgent_busy: an URGENT was taken from the queue and is not yet
+     * answered; the manifest waits for it.
+     */
+    pthread_t urgent;
+    pthread_cond_t urgent_ready;
+    int urgent_busy;
     sig_atomic_t boosts;
     sig_atomic_t repicks;
     int next_coid;
@@ -128,10 +137,15 @@ static void on_stop(int signo)
     _exit(EXIT_SUCCESS);
 }
 
-/* The caller holds node->lock. Raise the forward thread, then wake it. */
+/*
+ * The caller holds node->lock. Raise the forward thread to the class it
+ * will send next (URGENT is not its class, D-074), then wake both
+ * forward threads.
+ */
 static void wake_forward_locked(struct relay *node)
 {
-    int top = signal_queue_top_priority(&node->queue);
+    int top = signal_queue_top_priority_except(&node->queue,
+                                               SIGNAL_CLASS_URGENT);
 
     if (top > node->forward_prio) {
         int rc = pthread_setschedprio(node->forward, top);
@@ -145,12 +159,14 @@ static void wake_forward_locked(struct relay *node)
         node->boosts++;
     }
     pthread_cond_signal(&node->ready);
+    pthread_cond_signal(&node->urgent_ready);
 }
 
 /* The caller holds node->lock. This thread is the forward thread. */
 static void settle_forward_locked(struct relay *node)
 {
-    int top = signal_queue_top_priority(&node->queue);
+    int top = signal_queue_top_priority_except(&node->queue,
+                                               SIGNAL_CLASS_URGENT);
     int next = node->own_priority;
 
     if (top > next) {
@@ -312,29 +328,47 @@ static void close_quietly(const struct relay *node, int coid)
     }
 }
 
-/* current is the signal whose send failed. NULL when nothing was in flight. */
-static void send_failed(struct relay *node, int coid, const struct signal *current)
+/*
+ * Either forward thread: a send on coid failed. current is the signal
+ * whose send failed, NULL when nothing was in flight. The queue is lost.
+ * The first thread to see this connection fail marks the link down and
+ * closes it; the forward thread reopens it at the top of its loop, so
+ * two threads never open two connections (D-074).
+ */
+static void link_failed(struct relay *node, int coid, const struct signal *current)
 {
-    int fresh;
+    int first = 0;
+    int down;
 
-    printf("relay %s: link down %s coid %d\n",
-           node->own_name, node->next_name, coid);
-    fflush(stdout);
+    pthread_mutex_lock(&node->lock);
+    if (node->next_coid == coid) {
+        node->next_coid = -1;
+        node->link_down = 1;
+        first = 1;
+    }
+    pthread_mutex_unlock(&node->lock);
+    if (first) {
+        printf("relay %s: link down %s coid %d\n",
+               node->own_name, node->next_name, coid);
+        fflush(stdout);
+    }
     if (current != NULL) {
         write_lost(node, current);
     }
     pthread_mutex_lock(&node->lock);
-    drain_lost_locked(node);
-    node->next_coid = -1;
-    node->link_down = 1;
+    /*
+     * A failure on a connection the forward thread has already replaced
+     * must not lose what waits for the new one.
+     */
+    down = node->next_coid < 0;
+    if (down) {
+        drain_lost_locked(node);
+    }
+    pthread_cond_signal(&node->ready);
     pthread_mutex_unlock(&node->lock);
-    close_quietly(node, coid);
-    fresh = reopen_next(node);
-    pthread_mutex_lock(&node->lock);
-    node->next_coid = fresh;
-    node->link_down = 0;
-    wake_forward_locked(node);
-    pthread_mutex_unlock(&node->lock);
+    if (first) {
+        close_quietly(node, coid);
+    }
 }
 
 static void format_waiting(const struct signal_queue *q, char *buf, size_t buf_len)
@@ -438,6 +472,115 @@ static void *close_main(void *arg)
     return NULL;
 }
 
+/*
+ * The caller holds node->lock. The manifest closes the books, so it goes
+ * only after every queued signal, URGENT included, and after an URGENT
+ * the URGENT thread is still sending.
+ */
+static int manifest_may_go_locked(const struct relay *node)
+{
+    return node->manifest_waiting && signal_queue_count(&node->queue) == 0 &&
+           !node->urgent_busy;
+}
+
+/* The caller holds node->lock. Work for the forward thread (not URGENT). */
+static int forward_has_work_locked(const struct relay *node)
+{
+    return signal_queue_count(&node->queue) >
+               signal_queue_count_class(&node->queue, SIGNAL_CLASS_URGENT) ||
+           manifest_may_go_locked(node);
+}
+
+/*
+ * Sends URGENT only, at URGENT priority, on the same connection as the
+ * forward thread. With one forward thread an URGENT that arrived while a
+ * BACKGROUND was being sent waited for that send to be answered and for
+ * its log line to be written (up to 13 ms in S2, D-074). The order among
+ * URGENT stays the arrival order. A failed send marks the link down; the
+ * forward thread reopens it.
+ */
+static void *urgent_main(void *arg)
+{
+    struct relay *node = arg;
+
+    if (pin_cpu0(node->own_name) != 0 ||
+        set_fifo(node->own_name, SIGNAL_PRIO_URGENT) != 0) {
+        exit(EXIT_FAILURE);
+    }
+    for (;;) {
+        struct signal_queue_item item;
+        char waiting[4096];
+        struct signal_message message;
+        struct signal_reply reply;
+        int coid;
+        long sent;
+        int64_t arrived_ns = 0;
+        int64_t picked_ns;
+        int64_t start_ns;
+        int64_t end_ns;
+
+        pthread_mutex_lock(&node->lock);
+        while (signal_queue_count_class(&node->queue, SIGNAL_CLASS_URGENT) == 0 ||
+               node->next_coid < 0) {
+            pthread_cond_wait(&node->urgent_ready, &node->lock);
+        }
+        coid = node->next_coid;
+        if (signal_queue_pop_class(&node->queue, SIGNAL_CLASS_URGENT, &item) != 0) {
+            pthread_mutex_unlock(&node->lock);
+            continue;
+        }
+        node->urgent_busy = 1;
+        picked_ns = monotonic_ns(node->own_name);
+        waiting[0] = '\0';
+        if (!signal_log_quiet()) {
+            format_waiting(&node->queue, waiting, sizeof waiting);
+        }
+        pthread_mutex_unlock(&node->lock);
+
+        if (item.body.hop_count >= 1 && item.body.hop_count <= SIGNAL_MAX_HOPS) {
+            arrived_ns = item.body.hop_ns[item.body.hop_count - 1];
+        }
+        memset(&message, 0, sizeof message);
+        message.type = SIGNAL_MSG_TYPE;
+        message.body = item.body;
+        memset(&reply, 0, sizeof reply);
+        start_ns = monotonic_ns(node->own_name);
+        sent = MsgSend(coid, &message, sizeof message, &reply, sizeof reply);
+        end_ns = monotonic_ns(node->own_name);
+
+        pthread_mutex_lock(&node->lock);
+        node->urgent_busy = 0;
+        if (node->manifest_waiting) {
+            pthread_cond_signal(&node->ready);
+        }
+        pthread_mutex_unlock(&node->lock);
+        if (sent == -1) {
+            fprintf(stderr, "relay %s: sending signal %" PRIu64 " to %s failed: %s\n",
+                    node->own_name, item.body.number, node->next_name,
+                    strerror(errno));
+            link_failed(node, coid, &item.body);
+            continue;
+        }
+        if (sent != EOK) {
+            fprintf(stderr,
+                    "relay %s: %s rejected signal %" PRIu64 " with status %ld\n",
+                    node->own_name, node->next_name, item.body.number, sent);
+            exit(EXIT_FAILURE);
+        }
+        if (!signal_log_quiet()) {
+            printf("relay %s: sent signal %" PRIu64
+                   " class %s; still waiting: %s arrived %" PRId64
+                   " start %" PRId64 " end %" PRId64 " picked %" PRId64 "\n",
+                   node->own_name, item.body.number,
+                   signal_class_name(item.body.class_id),
+                   waiting[0] == '\0' ? "none" : waiting,
+                   arrived_ns, start_ns, end_ns, picked_ns);
+            fflush(stdout);
+        }
+    }
+    return NULL;
+}
+
 static void *forward_main(void *arg)
 {
     struct relay *node = arg;
@@ -455,6 +598,7 @@ static void *forward_main(void *arg)
     pthread_mutex_lock(&node->lock);
     node->next_coid = coid;
     node->link_down = 0;
+    wake_forward_locked(node);
     pthread_mutex_unlock(&node->lock);
 
     for (;;) {
@@ -474,8 +618,7 @@ static void *forward_main(void *arg)
         int64_t end_ns = 0;
 
         pthread_mutex_lock(&node->lock);
-        while (signal_queue_count(&node->queue) == 0 && !node->manifest_waiting &&
-               node->next_coid >= 0) {
+        while (!forward_has_work_locked(node) && node->next_coid >= 0) {
             pthread_cond_wait(&node->ready, &node->lock);
         }
         coid = node->next_coid;
@@ -486,15 +629,18 @@ static void *forward_main(void *arg)
             pthread_mutex_lock(&node->lock);
             node->next_coid = coid;
             node->link_down = 0;
+            wake_forward_locked(node);
             pthread_mutex_unlock(&node->lock);
             continue;
         }
-        if (signal_queue_count(&node->queue) > 0) {
-            if (signal_queue_pop(&node->queue, &item) == 0) {
+        if (signal_queue_count(&node->queue) >
+            signal_queue_count_class(&node->queue, SIGNAL_CLASS_URGENT)) {
+            if (signal_queue_pop_except(&node->queue, SIGNAL_CLASS_URGENT,
+                                        &item) == 0) {
                 have_item = 1;
                 format_waiting(&node->queue, waiting, sizeof waiting);
             }
-        } else if (node->manifest_waiting) {
+        } else if (manifest_may_go_locked(node)) {
             manifest = node->manifest;
             manifest_rcvid = node->manifest_rcvid;
             node->manifest_waiting = 0;
@@ -516,7 +662,7 @@ static void *forward_main(void *arg)
                 fprintf(stderr,
                         "relay %s: sending the manifest to %s failed: %s\n",
                         node->own_name, node->next_name, strerror(errno));
-                send_failed(node, coid, NULL);
+                link_failed(node, coid, NULL);
                 continue;
             }
             if (sent != EOK) {
@@ -573,7 +719,8 @@ static void *forward_main(void *arg)
             int repick_rc;
 
             pthread_mutex_lock(&node->lock);
-            while ((repick_rc = signal_queue_repick(&node->queue, &item)) == 1) {
+            while ((repick_rc = signal_queue_repick_except(
+                        &node->queue, SIGNAL_CLASS_URGENT, &item)) == 1) {
                 node->repicks++;
                 exchanged = 1;
             }
@@ -618,7 +765,7 @@ static void *forward_main(void *arg)
             fprintf(stderr, "relay %s: sending signal %" PRIu64 " to %s failed: %s\n",
                     node->own_name, item.body.number, node->next_name,
                     strerror(errno));
-            send_failed(node, coid, &item.body);
+            link_failed(node, coid, &item.body);
             continue;
         }
         if (sent != EOK) {
@@ -1032,6 +1179,7 @@ int main(int argc, char **argv)
     signal_queue_init(&node.queue);
     pthread_mutex_init(&node.lock, NULL);
     pthread_cond_init(&node.ready, NULL);
+    pthread_cond_init(&node.urgent_ready, NULL);
     pthread_mutex_init(&node.drop_lock, NULL);
     pthread_cond_init(&node.close_ready, NULL);
     {
@@ -1098,6 +1246,13 @@ int main(int argc, char **argv)
     create_rc = pthread_create(&node.forward, NULL, forward_main, &node);
     if (create_rc != 0) {
         fprintf(stderr, "relay %s: could not start the forward thread: %s\n",
+                node.own_name, strerror(create_rc));
+        name_detach(attach, 0);
+        return EXIT_FAILURE;
+    }
+    create_rc = pthread_create(&node.urgent, NULL, urgent_main, &node);
+    if (create_rc != 0) {
+        fprintf(stderr, "relay %s: could not start the URGENT forward thread: %s\n",
                 node.own_name, strerror(create_rc));
         name_detach(attach, 0);
         return EXIT_FAILURE;

@@ -54,6 +54,28 @@ static void remove_at(struct signal_queue *q, size_t index)
     memset(&q->items[q->count], 0, sizeof q->items[q->count]);
 }
 
+/*
+ * Index of the item that leaves first among items of class only (0: any
+ * class) whose class is not skip (0: skip none). -1 when there is none.
+ */
+static long best_index(const struct signal_queue *q, uint32_t only, uint32_t skip)
+{
+    long best = -1;
+    size_t i;
+
+    for (i = 0; i < q->count; i++) {
+        uint32_t c = q->items[i].body.class_id;
+
+        if ((only != 0 && c != only) || (skip != 0 && c == skip)) {
+            continue;
+        }
+        if (best < 0 || leaves_before(&q->items[i], &q->items[best])) {
+            best = (long)i;
+        }
+    }
+    return best;
+}
+
 void signal_queue_init(struct signal_queue *q)
 {
     if (q == NULL) {
@@ -81,8 +103,13 @@ int signal_queue_push(struct signal_queue *q, const struct signal *sig,
 
 int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held)
 {
-    size_t best;
-    size_t i;
+    return signal_queue_repick_except(q, 0, held);
+}
+
+int signal_queue_repick_except(struct signal_queue *q, uint32_t skip_class,
+                               struct signal_queue_item *held)
+{
+    long best;
     int held_priority;
     int best_priority;
     struct signal_queue_item taken;
@@ -90,15 +117,9 @@ int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held)
     if (q == NULL || held == NULL) {
         return -1;
     }
-    if (q->count == 0) {
+    best = best_index(q, 0, skip_class);
+    if (best < 0) {
         return 0;
-    }
-
-    best = 0;
-    for (i = 1; i < q->count; i++) {
-        if (leaves_before(&q->items[i], &q->items[best])) {
-            best = i;
-        }
     }
 
     held_priority = signal_class_priority(held->body.class_id);
@@ -108,7 +129,7 @@ int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held)
     }
 
     taken = q->items[best];
-    remove_at(q, best);
+    remove_at(q, (size_t)best);
     /*
      * remove_at freed one slot, so this push fits even when the queue
      * was at SIGNAL_QUEUE_CAP. The returned item keeps its arrival.
@@ -123,25 +144,41 @@ int signal_queue_repick(struct signal_queue *q, struct signal_queue_item *held)
     return 1;
 }
 
-int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
+static int pop_selected(struct signal_queue *q, uint32_t only, uint32_t skip,
+                        struct signal_queue_item *out)
 {
-    size_t best;
-    size_t i;
+    long best;
 
-    if (q == NULL || out == NULL || q->count == 0) {
+    if (q == NULL || out == NULL) {
         return -1;
     }
-
-    best = 0;
-    for (i = 1; i < q->count; i++) {
-        if (leaves_before(&q->items[i], &q->items[best])) {
-            best = i;
-        }
+    best = best_index(q, only, skip);
+    if (best < 0) {
+        return -1;
     }
-
     *out = q->items[best];
-    remove_at(q, best);
+    remove_at(q, (size_t)best);
     return 0;
+}
+
+int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
+{
+    return pop_selected(q, 0, 0, out);
+}
+
+int signal_queue_pop_class(struct signal_queue *q, uint32_t class_id,
+                           struct signal_queue_item *out)
+{
+    if (class_id == 0) {
+        return -1;
+    }
+    return pop_selected(q, class_id, 0, out);
+}
+
+int signal_queue_pop_except(struct signal_queue *q, uint32_t skip_class,
+                            struct signal_queue_item *out)
+{
+    return pop_selected(q, 0, skip_class, out);
 }
 
 int signal_queue_evict_newest(struct signal_queue *q, uint32_t class_id,
@@ -184,20 +221,38 @@ int signal_queue_evict_background(struct signal_queue *q,
 
 int signal_queue_top_priority(const struct signal_queue *q)
 {
-    size_t best;
-    size_t i;
+    return signal_queue_top_priority_except(q, 0);
+}
 
-    if (q == NULL || q->count == 0) {
+int signal_queue_top_priority_except(const struct signal_queue *q,
+                                     uint32_t skip_class)
+{
+    long best;
+
+    if (q == NULL) {
         return -1;
     }
-
-    best = 0;
-    for (i = 1; i < q->count; i++) {
-        if (leaves_before(&q->items[i], &q->items[best])) {
-            best = i;
-        }
+    best = best_index(q, 0, skip_class);
+    if (best < 0) {
+        return -1;
     }
     return signal_class_priority(q->items[best].body.class_id);
+}
+
+size_t signal_queue_count_class(const struct signal_queue *q, uint32_t class_id)
+{
+    size_t n = 0;
+    size_t i;
+
+    if (q == NULL) {
+        return 0;
+    }
+    for (i = 0; i < q->count; i++) {
+        if (q->items[i].body.class_id == class_id) {
+            n++;
+        }
+    }
+    return n;
 }
 
 size_t signal_queue_count(const struct signal_queue *q)
