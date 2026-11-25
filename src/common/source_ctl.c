@@ -95,6 +95,13 @@ int source_ctl_apply_at(struct source_control *ctl, const char *text,
             ctl->person_event_ns = now_ns;
             ctl->wake |= SOURCE_WAKE_URGENT;
         }
+    } else if (strcmp(cmd, "person plan") == 0) {
+        /* The zone sensor issues "person in" at the planned point (D-090). */
+        if (ctl->person_in) {
+            snprintf(ctl->error, sizeof ctl->error, "person already in");
+            return -1;
+        }
+        ctl->wake |= SOURCE_WAKE_PLAN;
     } else if (strcmp(cmd, "arm eye") == 0) {
         ctl->arm_plan = SOURCE_ARM_EYE;
         ctl->wake |= SOURCE_WAKE_COMMAND;

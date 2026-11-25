@@ -489,6 +489,18 @@ int main(void)
         expect_u32("URGENT says nobody", arm.flags, 0);
         ctl.wake = 0;
         expect_int("person out again", source_ctl_apply(&ctl, "person out"), 0);
+        ctl.wake = 0;
+        expect_int("person plan", source_ctl_apply_at(&ctl, "person plan\n", 1600), 0);
+        expect_u32("person plan wakes the zone sensor only", ctl.wake, SOURCE_WAKE_PLAN);
+        expect_int("person plan leaves the zone out", ctl.person_in, 0);
+        ctl.wake = 0;
+        (void)source_ctl_apply_at(&ctl, "person in", 1700);
+        ctl.wake = 0;
+        expect_int("person plan while in is rejected",
+                   source_ctl_apply_at(&ctl, "person plan", 1800), -1);
+        expect_u32("rejected plan wakes nothing", ctl.wake, 0);
+        (void)source_ctl_apply_at(&ctl, "person out", 1900);
+        ctl.wake = 0;
         expect_u32("out again wakes nothing", ctl.wake, 0);
 
         source_ctl_arm_payload(&ctl, SIGNAL_CLASS_COMMAND, &arm);

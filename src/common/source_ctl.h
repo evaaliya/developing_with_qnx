@@ -52,6 +52,8 @@ enum source_arm_plan {
 /* Set by a command that must be issued now, not on the next schedule time. */
 #define SOURCE_WAKE_URGENT 1u
 #define SOURCE_WAKE_COMMAND 2u
+/* "person plan": the zone sensor waits for the planned point (D-090). */
+#define SOURCE_WAKE_PLAN 4u
 
 struct source_control {
     int live;
@@ -84,6 +86,8 @@ int source_ctl_apply(struct source_control *ctl, const char *text);
  * the event time (D-080). "person in" while a person is already in, and
  * "person out" while nobody is, change nothing and wake nothing. Zone
  * commands set SOURCE_WAKE_URGENT, arm commands SOURCE_WAKE_COMMAND.
+ * "person plan" sets SOURCE_WAKE_PLAN and nothing else; it is rejected
+ * while a person is in (D-090).
  */
 int source_ctl_apply_at(struct source_control *ctl, const char *text,
                         int64_t now_ns);

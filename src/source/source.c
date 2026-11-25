@@ -1,5 +1,6 @@
 #define _QNX_SOURCE
 
+#include "arm_plan.h"
 #include "close_list.h"
 #include "issue_order.h"
 #include "issued_log.h"
@@ -17,6 +18,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +74,9 @@ static unsigned g_books_resumes;
  * (D-065). NULL in counted mode.
  */
 static struct live_book *g_mode_book;
+/* The zone sensor thread waits on this for "person plan" (D-090). */
+static sem_t g_plan_sem;
+static int g_plan_started;
 static int g_books_reset;
 static unsigned live_waiting(void);
 
@@ -515,6 +520,15 @@ static int io_write(resmgr_context_t *ctp, io_write_t *msg, RESMGR_OCB_T *ocb)
             fprintf(stderr, "source: waking the timer thread for the arm "
                     "failed: %s\n", strerror(errno));
         }
+        if ((wake & SOURCE_WAKE_PLAN) != 0) {
+            if (!g_plan_started || sem_post(&g_plan_sem) == -1) {
+                ctl_lock();
+                snprintf(g_ctl.error, sizeof g_ctl.error,
+                         "the zone sensor is not running");
+                ctl_unlock();
+                return EIO;
+            }
+        }
     }
     publish_source(0);
     _IO_SET_WRITE_NBYTES(ctp, nbytes);
@@ -801,6 +815,200 @@ static void print_person_urgent(void)
     }
 }
 
+/*
+ * Every URGENT number issued, in order, for counting losses in a row
+ * (B29). Kept under the issue lock, printed once the run has stopped.
+ */
+#define URGENT_ISSUED_CAP 2048
+#define URGENT_ISSUED_PER_LINE 64
+static uint64_t g_urgent_issued[URGENT_ISSUED_CAP];
+static unsigned g_urgent_issued_n;
+static unsigned g_urgent_issued_missed;
+
+static void print_urgent_issued(void)
+{
+    unsigned i;
+
+    for (i = 0; i < g_urgent_issued_n; i++) {
+        if (i % URGENT_ISSUED_PER_LINE == 0) {
+            printf("%ssource: urgent-issued %u", i == 0 ? "" : "\n", i);
+        }
+        printf(" %" PRIu64, g_urgent_issued[i]);
+    }
+    if (g_urgent_issued_n > 0) {
+        printf("\n");
+    }
+    printf("source: urgent-issued count %u not listed %u\n", g_urgent_issued_n,
+           g_urgent_issued_missed);
+}
+
+/*
+ * The zone sensor that sees the arm (D-089, D-090). "person plan" wakes
+ * it; it reads when the approach began from the sink's shared object
+ * (not over the network), sleeps to the instant the tool is the stop
+ * margin plus the braking path from the eye, and issues "person in"
+ * with that instant as the event time. The result is printed after stop.
+ */
+#define PLAN_WAIT_NS 3000000000LL
+#define PLAN_POLL_NS 1000000LL
+static int64_t g_plan_offset_ns;
+static int64_t g_source_start_ns;
+static int g_plan_done;
+static int64_t g_plan_start_ns;
+static int32_t g_plan_start_eye_um;
+static int64_t g_plan_event_ns;
+static int64_t g_plan_woke_ns;
+static char g_plan_error[128];
+
+static void sleep_until(int64_t t_ns)
+{
+    struct timespec ts;
+
+    ts.tv_sec = (time_t)(t_ns / 1000000000LL);
+    ts.tv_nsec = (long)(t_ns % 1000000000LL);
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
+    }
+}
+
+static void plan_fail(const char *why)
+{
+    snprintf(g_plan_error, sizeof g_plan_error, "%s", why);
+    __atomic_store_n(&g_plan_done, -1, __ATOMIC_RELEASE);
+}
+
+static void plan_once(void)
+{
+    const struct arm_approach *a = NULL;
+    int64_t asked = monotonic_ns();
+    int64_t start = 0;
+    int32_t eye_um = 0;
+    int64_t event;
+    unsigned wake;
+    int status;
+
+    for (;;) {
+        int64_t now = monotonic_ns();
+
+        if (a == NULL) {
+            a = arm_approach_open(ARM_APPROACH_STORE);
+        }
+        if (a != NULL) {
+            int r = arm_approach_read(a, &start, &eye_um);
+
+            if (r < 0) {
+                arm_approach_close(a);
+                plan_fail("the approach object is not the sink's");
+                return;
+            }
+            if (r == 1 && start > g_source_start_ns) {
+                break;
+            }
+        }
+        if (now - asked > PLAN_WAIT_NS) {
+            arm_approach_close(a);
+            plan_fail(a == NULL ? "no approach object from the sink within 3 s"
+                                : "no approach began within 3 s");
+            return;
+        }
+        sleep_until(now + PLAN_POLL_NS);
+    }
+    arm_approach_close(a);
+    event = start + g_plan_offset_ns;
+    if (monotonic_ns() >= event) {
+        g_plan_start_ns = start;
+        g_plan_start_eye_um = eye_um;
+        plan_fail("the planned point had passed when the approach was seen");
+        return;
+    }
+    sleep_until(event);
+    g_plan_woke_ns = monotonic_ns();
+
+    ctl_lock();
+    g_ctl.wake = 0;
+    status = source_ctl_apply_at(&g_ctl, "person in", event);
+    if (status == 0) {
+        live_book_set_mode(g_mode_book, g_ctl.flood, g_ctl.urgent_on);
+    }
+    wake = g_ctl.wake;
+    g_ctl.wake = 0;
+    ctl_unlock();
+    if ((wake & SOURCE_WAKE_URGENT) != 0 && g_timer_coid != -1 &&
+        MsgSendPulse(g_timer_coid, SIGNAL_PRIO_URGENT, PULSE_ZONE, 0) == -1) {
+        g_plan_start_ns = start;
+        plan_fail("waking the timer thread for the zone failed");
+        return;
+    }
+    g_plan_start_ns = start;
+    g_plan_start_eye_um = eye_um;
+    g_plan_event_ns = event;
+    __atomic_store_n(&g_plan_done, status == 0 && (wake & SOURCE_WAKE_URGENT) != 0
+                                       ? 1 : -1, __ATOMIC_RELEASE);
+    if (status != 0 || (wake & SOURCE_WAKE_URGENT) == 0) {
+        snprintf(g_plan_error, sizeof g_plan_error, "a person was already in");
+    }
+}
+
+static void *plan_thread(void *arg)
+{
+    (void)arg;
+    (void)pin_cpu0();
+    /* SIGNAL_PRIO_URGENT: 30 in our build, 10 in the naive one (D-084). */
+    if (set_fifo(SIGNAL_PRIO_URGENT) != 0) {
+        return NULL;
+    }
+    for (;;) {
+        if (sem_wait(&g_plan_sem) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return NULL;
+        }
+        plan_once();
+    }
+}
+
+static void start_plan(void)
+{
+    pthread_t thread;
+    int rc;
+
+    g_source_start_ns = monotonic_ns();
+    g_plan_offset_ns = arm_plan_time_to_distance_ns(arm_plan_event_distance_m());
+    if (sem_init(&g_plan_sem, 0, 0) == -1) {
+        fprintf(stderr, "source: the zone sensor semaphore failed: %s\n",
+                strerror(errno));
+        return;
+    }
+    rc = pthread_create(&thread, NULL, plan_thread, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "source: the zone sensor thread did not start: %s\n",
+                strerror(rc));
+        return;
+    }
+    g_plan_started = 1;
+}
+
+static void print_person_plan(void)
+{
+    int done = __atomic_load_n(&g_plan_done, __ATOMIC_ACQUIRE);
+
+    if (done == 0) {
+        return;
+    }
+    if (done < 0) {
+        printf("source: person-plan failed: %s; approach_start_ns %lld\n",
+               g_plan_error, (long long)g_plan_start_ns);
+        return;
+    }
+    printf("source: person-plan approach_start_ns %lld start_eye_um %ld "
+           "offset_ns %lld event_ns %lld woke_late_ns %lld margin_um %.0f "
+           "event_eye_um %.0f\n",
+           (long long)g_plan_start_ns, (long)g_plan_start_eye_um,
+           (long long)g_plan_offset_ns, (long long)g_plan_event_ns,
+           (long long)(g_plan_woke_ns - g_plan_event_ns),
+           ARM_PLAN_MARGIN_M * 1e6, arm_plan_event_distance_m() * 1e6);
+}
+
 static int issue_live(uint32_t class_id, uint32_t extra_flags)
 {
     struct signal_arm arm;
@@ -826,6 +1034,11 @@ static int issue_live(uint32_t class_id, uint32_t extra_flags)
     arm.flags |= extra_flags;
     if (class_id == SIGNAL_CLASS_URGENT) {
         note_person_urgent(number, &arm);
+        if (g_urgent_issued_n < URGENT_ISSUED_CAP) {
+            g_urgent_issued[g_urgent_issued_n++] = number;
+        } else {
+            g_urgent_issued_missed++;
+        }
     }
     coid = g_live.coid;
     /*
@@ -1316,6 +1529,10 @@ static int end_live(int failed)
            (unsigned long long)g_ctl.issued_background);
     ctl_unlock();
     print_person_urgent();
+    print_person_plan();
+    pthread_mutex_lock(&g_issue_lock);
+    print_urgent_issued();
+    pthread_mutex_unlock(&g_issue_lock);
     fflush(stdout);
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
@@ -1514,6 +1731,7 @@ static int run_live(int argc, char **argv)
         return EXIT_FAILURE;
     }
     g_watch_started = 1;
+    start_plan();
 
     for (;;) {
         struct _pulse pulse;
