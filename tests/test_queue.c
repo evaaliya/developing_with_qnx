@@ -489,6 +489,37 @@ int main(void)
     expect_int("null repick except", signal_queue_repick_except(NULL, SIGNAL_CLASS_URGENT, &held), -1);
     }
 
+    /*
+     * The naive build (D-084) takes the queue in arrival order, any class:
+     * the smallest arrival_order leaves first, even when an URGENT waits.
+     */
+    signal_queue_init(&q);
+    push(&q, 30, SIGNAL_CLASS_BACKGROUND, 50, 1);
+    push(&q, 31, SIGNAL_CLASS_URGENT, 40, 3);
+    push(&q, 32, SIGNAL_CLASS_COMMAND, 60, 2);
+    expect_int("pop oldest", signal_queue_pop_oldest(&q, &item), 0);
+    expect_u64("pop oldest takes the first arrival, a BACKGROUND", item.body.number, 30);
+    expect_int("pop oldest again", signal_queue_pop_oldest(&q, &item), 0);
+    expect_u64("then the COMMAND that came second", item.body.number, 32);
+    expect_int("pop oldest a third time", signal_queue_pop_oldest(&q, &item), 0);
+    expect_u64("the URGENT leaves last", item.body.number, 31);
+    item.body.number = 77;
+    expect_int("pop oldest on an empty queue", signal_queue_pop_oldest(&q, &item), -1);
+    expect_u64("an empty pop oldest leaves the output alone", item.body.number, 77);
+    expect_int("null pop oldest queue", signal_queue_pop_oldest(NULL, &item), -1);
+    expect_int("null pop oldest output", signal_queue_pop_oldest(&q, NULL), -1);
+    for (i = 0; i < SIGNAL_QUEUE_CAP; i++) {
+        push(&q, 100 + i, (i % 2) ? SIGNAL_CLASS_URGENT : SIGNAL_CLASS_BACKGROUND,
+             1000 - (int64_t)i, 500 + i);
+    }
+    rc = 1;
+    for (i = 0; i < SIGNAL_QUEUE_CAP; i++) {
+        if (signal_queue_pop_oldest(&q, &item) != 0 || item.body.number != 100 + i) {
+            rc = 0;
+        }
+    }
+    expect_int("a full queue leaves in arrival order, not by class or time", rc, 1);
+
     signal_queue_init(&q);
     expect_int("null repick queue", signal_queue_repick(NULL, &item), -1);
     expect_int("null repick held", signal_queue_repick(&q, NULL), -1);

@@ -96,6 +96,13 @@ int signal_queue_top_priority_except(const struct signal_queue *q,
                                      uint32_t skip_class);
 size_t signal_queue_count_class(const struct signal_queue *q, uint32_t class_id);
 
+/*
+ * The naive build (D-084): the item with the smallest arrival_order,
+ * whatever its class. 0 on success; -1 if q or out is NULL or the queue
+ * is empty, and then out is unchanged.
+ */
+int signal_queue_pop_oldest(struct signal_queue *q, struct signal_queue_item *out);
+
 /* NULL when q is NULL or index is past the end. Order is storage order. */
 const struct signal_queue_item *signal_queue_item(const struct signal_queue *q,
                                                   size_t index);

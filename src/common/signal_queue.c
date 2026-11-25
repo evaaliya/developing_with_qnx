@@ -166,6 +166,24 @@ int signal_queue_pop(struct signal_queue *q, struct signal_queue_item *out)
     return pop_selected(q, 0, 0, out);
 }
 
+int signal_queue_pop_oldest(struct signal_queue *q, struct signal_queue_item *out)
+{
+    size_t best = 0;
+    size_t i;
+
+    if (q == NULL || out == NULL || q->count == 0) {
+        return -1;
+    }
+    for (i = 1; i < q->count; i++) {
+        if (q->items[i].arrival_order < q->items[best].arrival_order) {
+            best = i;
+        }
+    }
+    *out = q->items[best];
+    remove_at(q, best);
+    return 0;
+}
+
 int signal_queue_pop_class(struct signal_queue *q, uint32_t class_id,
                            struct signal_queue_item *out)
 {
