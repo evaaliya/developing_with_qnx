@@ -6,6 +6,7 @@
 #include "node_store.h"
 #include "signal_ledger.h"
 #include "signal_msg.h"
+#include "signal_sched.h"
 #include "telemetry_pub.h"
 #include "telemetry_snap.h"
 #include "wire.h"
@@ -317,6 +318,45 @@ static void print_arm_summary(void)
            g_drive.person_stops, g_drive.state_stops, g_arm_reports);
 }
 
+/*
+ * The track of the approach for the replay (D-085), printed by the main
+ * thread once the network has stopped. The model thread may still run:
+ * only the points below the published count are read.
+ */
+#define ARM_TRACK_PER_LINE 64
+
+static void print_arm_track(void)
+{
+    const struct arm_track *tr = &g_drive.track;
+    int end = __atomic_load_n(&tr->end, __ATOMIC_ACQUIRE);
+    unsigned n = __atomic_load_n(&tr->count, __ATOMIC_ACQUIRE);
+    unsigned i;
+
+    if (!g_arm_on) {
+        return;
+    }
+    if (n == 0) {
+        printf("sink: arm-track none\n");
+        return;
+    }
+    printf("sink: arm-track start_ns %lld step_ns %lld samples %u end %s "
+           "brake_ns %lld brake_by %s stop_number %" PRIu64 " touch_ns %lld\n",
+           (long long)tr->start_ns, (long long)ARM_TRACK_STEP_NS, n,
+           arm_track_end_name(end),
+           end == ARM_TRACK_OPEN ? 0LL : (long long)tr->brake_ns,
+           arm_brake_reason_name(end == ARM_TRACK_OPEN ? ARM_BRAKE_NONE
+                                                       : tr->brake_by),
+           end == ARM_TRACK_OPEN ? (uint64_t)0 : tr->stop_number,
+           end == ARM_TRACK_OPEN ? 0LL : (long long)tr->touch_ns);
+    for (i = 0; i < n; i++) {
+        if (i % ARM_TRACK_PER_LINE == 0) {
+            printf("%ssink: arm-track-um %u", i == 0 ? "" : "\n", i);
+        }
+        printf(" %ld", (long)tr->eye_um[i]);
+    }
+    printf("\n");
+}
+
 static void print_summary(const struct signal_ledger *ledger)
 {
     static const uint32_t classes[] = {
@@ -342,6 +382,7 @@ static void print_summary(const struct signal_ledger *ledger)
     }
     printf("sink: unaccounted %u\n", signal_ledger_unaccounted(ledger));
     print_arm_summary();
+    print_arm_track();
     fflush(stdout);
     publish_sink(ledger, current_state, 1);
 }
@@ -619,9 +660,10 @@ static void start_arm(void)
     }
     g_arm_on = 1;
     printf("sink: arm model every %lld ns at priority %d, speed %.0f mm/s, "
-           "brake %.2f m/s^2, home %.1f mm from the eye\n",
+           "brake %.2f m/s^2, home %.1f mm from the eye, build %s\n",
            (long long)ARM_MODEL_STEP_NS, ARM_MODEL_PRIO, ARM_SPEED_M_S * 1000.0,
-           ARM_DECEL_M_S2, arm_eye_distance(g_drive.arm.q) * 1000.0);
+           ARM_DECEL_M_S2, arm_eye_distance(g_drive.arm.q) * 1000.0,
+           SIGNAL_BUILD_NAME);
     fflush(stdout);
 }
 

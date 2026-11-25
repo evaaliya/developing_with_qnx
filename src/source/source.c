@@ -749,6 +749,58 @@ static void try_reopen(void)
  * number goes on the book before the send, so a death in the send
  * leaves it to be closed (D-063).
  */
+/*
+ * The URGENT that carried "person in" (D-085): kept in memory by the
+ * timer thread, the only thread that issues URGENT, and printed once the
+ * run has stopped, so no line is written on the URGENT path.
+ */
+#define PERSON_URGENT_CAP 128
+#define PERSON_EVENT_CAP 8
+static uint64_t g_person_urgent[PERSON_URGENT_CAP];
+static unsigned g_person_urgent_n;
+static unsigned g_person_urgent_missed;
+static uint64_t g_person_event_number[PERSON_EVENT_CAP];
+static int64_t g_person_event_ns[PERSON_EVENT_CAP];
+static unsigned g_person_event_n;
+
+static void note_person_urgent(uint64_t number, const struct signal_arm *arm)
+{
+    if ((arm->flags & SIGNAL_ARM_PERSON_IN) == 0) {
+        return;
+    }
+    if ((arm->flags & SIGNAL_ARM_EVENT) != 0 && g_person_event_n < PERSON_EVENT_CAP) {
+        g_person_event_number[g_person_event_n] = number;
+        g_person_event_ns[g_person_event_n] = arm->event_ns;
+        g_person_event_n++;
+    }
+    if (g_person_urgent_n < PERSON_URGENT_CAP) {
+        g_person_urgent[g_person_urgent_n++] = number;
+    } else {
+        g_person_urgent_missed++;
+    }
+}
+
+static void print_person_urgent(void)
+{
+    unsigned i;
+
+    for (i = 0; i < g_person_event_n; i++) {
+        printf("source: person-in event_ns %lld URGENT %" PRIu64 "\n",
+               (long long)g_person_event_ns[i], g_person_event_number[i]);
+    }
+    if (g_person_urgent_n == 0) {
+        return;
+    }
+    printf("source: person-in URGENT");
+    for (i = 0; i < g_person_urgent_n; i++) {
+        printf(" %" PRIu64, g_person_urgent[i]);
+    }
+    printf("\n");
+    if (g_person_urgent_missed > 0) {
+        printf("source: person-in URGENT not listed %u\n", g_person_urgent_missed);
+    }
+}
+
 static int issue_live(uint32_t class_id, uint32_t extra_flags)
 {
     struct signal_arm arm;
@@ -772,6 +824,9 @@ static int issue_live(uint32_t class_id, uint32_t extra_flags)
     source_ctl_arm_payload(&g_ctl, class_id, &arm);
     ctl_unlock();
     arm.flags |= extra_flags;
+    if (class_id == SIGNAL_CLASS_URGENT) {
+        note_person_urgent(number, &arm);
+    }
     coid = g_live.coid;
     /*
      * The number is on the book. Release the lock before the send, as the
@@ -1260,6 +1315,7 @@ static int end_live(int failed)
            (unsigned long long)g_ctl.issued_command,
            (unsigned long long)g_ctl.issued_background);
     ctl_unlock();
+    print_person_urgent();
     fflush(stdout);
     return failed ? EXIT_FAILURE : EXIT_SUCCESS;
 }
@@ -1362,8 +1418,8 @@ static int run_live(int argc, char **argv)
                 ceiling, SIGNAL_PRIO_URGENT);
         return EXIT_FAILURE;
     }
-    printf("source: SCHED_FIFO ceiling %d, live signals to %s\n",
-           ceiling, next_name);
+    printf("source: SCHED_FIFO ceiling %d, live signals to %s, build %s\n",
+           ceiling, next_name, SIGNAL_BUILD_NAME);
     fflush(stdout);
     if (start_device() != 0) {
         return EXIT_FAILURE;

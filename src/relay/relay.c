@@ -147,7 +147,8 @@ static void wake_forward_locked(struct relay *node)
     int top = signal_queue_top_priority_except(&node->queue,
                                                SIGNAL_CLASS_URGENT);
 
-    if (top > node->forward_prio) {
+    /* The naive build raises nothing (D-084). */
+    if (!SIGNAL_NAIVE && top > node->forward_prio) {
         int rc = pthread_setschedprio(node->forward, top);
 
         if (rc != 0) {
@@ -248,7 +249,12 @@ static void write_lost(const struct relay *node, const struct signal *sig)
  */
 static void note_drop(struct relay *node, uint64_t number, uint32_t class_id)
 {
-    if (!signal_log_quiet()) {
+    /*
+     * A dropped URGENT is printed in quiet runs too, so the fate of the
+     * stop signal shows in the run log (D-085). Only the naive build
+     * drops URGENT.
+     */
+    if (!signal_log_quiet() || class_id == SIGNAL_CLASS_URGENT) {
         int64_t at_ns = monotonic_ns(node->own_name);
 
         pthread_mutex_lock(&node->notice_lock);
@@ -486,6 +492,11 @@ static int manifest_may_go_locked(const struct relay *node)
 /* The caller holds node->lock. Work for the forward thread (not URGENT). */
 static int forward_has_work_locked(const struct relay *node)
 {
+    /* The naive build has one forward thread for every class (D-084). */
+    if (SIGNAL_NAIVE) {
+        return signal_queue_count(&node->queue) > 0 ||
+               manifest_may_go_locked(node);
+    }
     return signal_queue_count(&node->queue) >
                signal_queue_count_class(&node->queue, SIGNAL_CLASS_URGENT) ||
            manifest_may_go_locked(node);
@@ -633,7 +644,13 @@ static void *forward_main(void *arg)
             pthread_mutex_unlock(&node->lock);
             continue;
         }
-        if (signal_queue_count(&node->queue) >
+        if (SIGNAL_NAIVE && signal_queue_count(&node->queue) > 0) {
+            /* Arrival order, any class (D-084). */
+            if (signal_queue_pop_oldest(&node->queue, &item) == 0) {
+                have_item = 1;
+                format_waiting(&node->queue, waiting, sizeof waiting);
+            }
+        } else if (signal_queue_count(&node->queue) >
             signal_queue_count_class(&node->queue, SIGNAL_CLASS_URGENT)) {
             if (signal_queue_pop_except(&node->queue, SIGNAL_CLASS_URGENT,
                                         &item) == 0) {
@@ -714,7 +731,12 @@ static void *forward_main(void *arg)
         } else {
             arrived_ns = 0;
         }
-        {
+        if (SIGNAL_NAIVE) {
+            /* No second choice before the send (D-084). */
+            pthread_mutex_lock(&node->lock);
+            picked_ns = monotonic_ns(node->own_name);
+            pthread_mutex_unlock(&node->lock);
+        } else {
             int exchanged = 0;
             int repick_rc;
 
@@ -1234,6 +1256,8 @@ int main(int argc, char **argv)
            "URGENT %d\n",
            node.own_name, ceiling, node.own_priority, SIGNAL_PRIO_BACKGROUND,
            SIGNAL_PRIO_COMMAND, SIGNAL_PRIO_URGENT);
+    printf("relay %s: build %s, queue %zu\n", node.own_name, SIGNAL_BUILD_NAME,
+           node.capacity);
     fflush(stdout);
 
     attach = name_attach(NULL, node.own_name, 0);
@@ -1250,7 +1274,9 @@ int main(int argc, char **argv)
         name_detach(attach, 0);
         return EXIT_FAILURE;
     }
-    create_rc = pthread_create(&node.urgent, NULL, urgent_main, &node);
+    /* The naive build has no URGENT forward thread (D-084). */
+    create_rc = SIGNAL_NAIVE ? 0
+                             : pthread_create(&node.urgent, NULL, urgent_main, &node);
     if (create_rc != 0) {
         fprintf(stderr, "relay %s: could not start the URGENT forward thread: %s\n",
                 node.own_name, strerror(create_rc));
@@ -1509,8 +1535,12 @@ int main(int argc, char **argv)
             write_lost(&node, &buffer.message.body);
             continue;
         }
-        if (full &&
-            buffer.message.body.class_id == SIGNAL_CLASS_BACKGROUND) {
+        /*
+         * A full queue drops the arriving BACKGROUND. The naive build
+         * drops the arriving signal of any class (D-084).
+         */
+        if (full && (SIGNAL_NAIVE ||
+                     buffer.message.body.class_id == SIGNAL_CLASS_BACKGROUND)) {
             pthread_mutex_unlock(&node.lock);
             /* EOK: source stops the run on any other status (D-042). */
             if (MsgReply(rcvid, EOK, NULL, 0) == -1) {
