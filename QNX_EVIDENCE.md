@@ -2478,3 +2478,75 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-25 21:38 – 23:40 +06 · the planned stop at the eye: margin from the URGENT deadline, delay as extra path
+
+What changed (decisions D-089 to D-091):
+
+- **A stop margin taken from the network's promise, written down before any run.** The margin is the URGENT deadline times the approach speed: 31 ms (D-058) × 250 mm/s (D-079) = 7.75 mm. The planned stop point is 7.75 mm from the eye. "person in" is issued when the tool is 7.75 + 25.0 mm (the braking path) = 32.75 mm from the eye, so with no delay the arm rests at the planned point and every millisecond of delay is 0.25 mm past it. A chain that keeps its deadline cannot touch the eye; a chain that misses it does. Checked with the arm model on the host before the runs: the event comes 668 141 101 ns into the approach; with no delay the tool rests 7.754 mm from the eye (4 µm is the curvature of the tool path); 31 ms of delay leaves 0.004 mm, 35 ms touches. The arm parameters of D-079 are unchanged; `run-arm-stop` and `run-arm-compare` keep their random event.
+- **The event at the computed instant, the same for both networks.** When the arm model starts the approach, the sink writes the start time to a small shared memory object (`/signal-sink-arm`). `echo 'person plan' > /dev/signal-source` wakes a zone sensor thread in source (URGENT priority: 30 in our build, 10 in the naive one, as every source thread there); it reads the start from shared memory, not over the network, sleeps to start + 668.141101 ms with `clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME)` and issues "person in" with that instant as the event time. The time the thread wakes late counts in the delay to the brake. Every run checks, from the model's own track, that the tool was 32.75 ± 0.05 mm from the eye at the event; a run off by more fails and is left out of the numbers (D-091).
+- **Every URGENT issued is listed after stop**, so losses in a row can be counted exactly.
+- **`make run-arm-precise`**: both networks in one guest boot in alternating blocks: ours 34 calm and 34 flooded, naive 34 calm and 100 flooded (6 naive flooded runs a block, so the extra runs are spread over the series). D-077 watchdog on every run; a replay file per run in the D-085 format plus `plan_point_mm`, `event_eye_mm`, `extra_path_mm`, `past_plan_mm` and the fate of every flagged URGENT up to the brake.
+
+One build of each network for every arm result below:
+
+```text
+395da8a708fe82c6d2deb5b55db31cbc715864fd  source
+ec5cc20d70f870ec9ab44af84b8becf21487ffbc  sink
+030df50f4f3c7c424829f6c3bb10332ecb9c8954  relay
+0b86b41d09e096b878071d684766c91b465256cf  naive/source
+443bce1cd1f8ce3d83bf69a9a099a9c1c6df2e53  naive/sink
+edd46fec05e1d700400319d69f085272e836b350  naive/relay
+```
+
+### The planned stop on both networks (`make run-arm-precise`, 21:53 – 22:10, one guest boot)
+
+202 runs, 0 failed on the guest. Logs: `build/arm/runs/20261125-215226/`, replay files in its `replay/`. The Mac load average was 2.8–3.5 before and after. Four trial runs before the series (`build/b29/smoke/`) are not in the numbers.
+
+The tool at the event: 32.750 mm from the eye with an error of 0.000 mm in every run of ours and of the naive network at rest; at most 0.034 mm in the naive flooded runs, except three. In `naive-flood-18`, `-48` and `-89` the tool was 39.019, 35.487 and 37.622 mm away: the naive network had gone to SAFE for 21–67 ms at the start of or during the approach (a late pulse), the state brake held the arm and it fell behind the plan. These three runs fail the check and are left out of the table (D-091).
+
+| | ours, calm | naive, calm | ours, flood | naive, flood |
+|---|---|---|---|---|
+| runs in the numbers | 34 | 34 | 34 | 97 (3 failed the event check) |
+| delay from the event to the brake: median | 2.865 ms | 2.658 ms | 2.231 ms | 23.549 ms |
+| p99 (nearest rank) / worst | 4.048 / 4.048 ms (ours-calm-20) | 4.273 / 4.273 ms (naive-calm-27) | 3.360 / 3.360 ms (ours-flood-11) | 35.194 / 35.194 ms (naive-flood-75) |
+| extra path (0.25 mm per ms): median / p99 / worst | 0.72 / 1.01 / 1.01 mm | 0.66 / 1.07 / 1.07 mm | 0.56 / 0.84 / 0.84 mm | 5.89 / 8.80 / 8.80 mm |
+| rest past the planned point: median / worst | 0.71 / 1.01 mm | 0.66 / 1.06 mm | 0.55 / 0.84 mm | 5.88 / 7.75 mm (at the eye) |
+| closest to the eye | 6.74 mm | 6.68 mm | 6.91 mm | 0.00 mm |
+| **touched the eye** | **0 of 34** | **0 of 34** | **0 of 34** | **16 of 97** |
+| stop signal delivered / late / dropped | 34 / 0 / 0 | 34 / 0 / 0 | 34 / 0 / 0 | 92 / 4 / 1 (relay A) |
+| zone sensor woke after the planned instant: median / worst | 1.61 / 2.95 ms | 1.43 / 3.09 ms | 1.37 / 2.64 ms | 1.70 / 3.44 ms |
+| late URGENT or COMMAND outside guest stalls and faults | 0 | 0 | 0 | 381 |
+
+**Every touch is a delay over the URGENT deadline.** The 16 touches had delays of 31.174 to 35.194 ms; every naive flooded run without a touch had at most 30.972 ms. The boundary is the deadline, as D-089 says. In 11 of the 16 touches the stop signal itself arrived on time: the deadline counts from the issue, the delay from the event, and between them are the zone sensor's wake-up (median 1.4–1.7 ms in every mode) and the issue by the timer thread. That part is the same in both networks; in ours it is more than half of the whole delay.
+
+Delays of the 16 touches (ms): 31.174 31.224 31.276 31.288 31.387 31.792 31.835 32.089 32.261 32.441 33.264 33.416 33.610 33.732 34.882 35.194. Stop signal late in 4 of them (naive-flood-38, -50, -62, -75).
+
+**Runs for the video** (D-086 for ours; for the naive network the touch with the latest brake): ours — **ours-flood-11**, rest 6.91 mm from the eye, 0.84 mm past the planned point, delay 3.360 ms, stop signal delivered. Naive — **naive-flood-75**, touched the eye, delay 35.194 ms (extra path 8.80 mm, more than the 7.75 mm margin), stop signal 2262 late.
+
+**URGENT lost in a row** (naive network under flood): B28, 34 runs — 3 of 4937 URGENT dropped at relay A, one per run (the sink summary; no run had two); B29, 100 runs — 2 of 15535, by the list of every issued URGENT, both alone. Together 5 of 20472, all streaks of 1; no streak of 2 or more was seen in 20472 URGENT. A streak of n adds n URGENT periods before the next flagged URGENT: 1 → 20 ms (5 mm at 250 mm/s), 2 → 40 ms (10 mm), 3 → 60 ms (15 mm). In naive-flood-97 the stop signal 2188 was dropped at relay A; the arm was braked 3.3 ms after the event by URGENT 2115, a scheduled URGENT that already carried the zone flag.
+
+### Our network after the change (checks)
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 1459 PASS, 0 FAIL |
+| `make scenarios` ×5 | 0 each | `scenarios failed 0`. S2 URGENT n 324–325, median 945000–1026000 ns, max 2034000–12290992 ns, R5 0 |
+| `scripts/s2-series.sh 10` | 0 each | n below 100 in 0 of 10, n 322–326. Gaps over 40 ms in runs 04, 05, 07 (up to 83.4 ms); late only in run 07: 3, all inside guest stalls |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `panel-check`, `run-hold-urgent` | 0 each | `unaccounted 0` wherever it is printed. Late signals only in `run-stop`, all 11 inside its fault |
+| `make run-arm-stop` | 0 | calm: delay median 2.472 ms, worst 3.903 ms, 34 of 34 short of the eye and in the 10 mm margin; flood: 0.723 / 1.048 ms, 34 of 34. Late outside stalls 0 |
+| `make run-flood-hang` ×5 | 4 passed, **1 failed** | the failure is a guest kernel stop (F-032) in the mute variant with relay A under `SIGSTOP`, run 02 (`nto_process@1132`, the same place as in B28). The guest was restarted; the 5 tries are 2 + 3 |
+| `make run-long-flood` ×5 | 0 each | `failed 0 of 5` |
+| `make measure` (N=34) | 0 | R5 0, late 0 of 68. URGENT median calm 1699504 ns (p99 5278992), flood 1759000 ns (p99 4388000): **over the 1.19 ms flood ceiling of D-051**. See the A/B below |
+| `make run-long-live` (600 s) | 0 | 184680 signals, `unaccounted 0`; issued equals the sink totals (URGENT 29442, COMMAND 750, BACKGROUND 154488). 6 late URGENT or COMMAND, all inside guest stalls; 334 stalls over 5 ms, worst 115.9 ms |
+| `make run-live-restart` (300 s, four kills) | 0 | PASS; every issued URGENT, COMMAND and BACKGROUND is accounted or waits to be closed |
+
+**`make measure` A/B on one guest boot, right after the checks (23:34–23:40):** the B28 build (`2ef8f06`, rebuilt from a worktree; SHA-1 equal to the B28 table) and this batch's build in turn, N=34 each. URGENT median calm / flood: B28 896504 / 846504 ns, B29 857496 / 849504 ns, B28 866992 / 905504 ns, B29 801496 / 788000 ns. R5 0 and late 0 in all four. Both builds are under 1.19 ms; the difference between the builds is smaller than between two runs of one build. The 1.70–1.76 ms of the measure in the chain is not this batch's code; it ran right after `run-long-flood` with the Mac at a load average of 5–7, and the cause was not measured further.
+
+The guest kernel stopped twice during the checks: `make scenarios` run 02 at 22:18 (`nto_time@2968`, a new place, active address space `tmp/sink`) and `run-flood-hang` run 02 at 22:50 (`nto_process@1132`). After the first stop the guest booted without its disk: the QEMU descriptor `disk-qemu.vmdk` was cut at 512 bytes (F-035); it was rewritten with the person's consent and the guest booted at 22:29. The checks above all ran on the boots of 22:29 and 22:59; the first `make scenarios` series (1 of 2 passed before the stop) is not in the table. The arm series ran on the boot of 20:09. The Mac load average was 4.5–7 during the checks; D-076 asks for a free host, and the stall counts (334 in `run-long-live` against 111 in B28) show it was not.
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
