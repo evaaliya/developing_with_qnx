@@ -2312,3 +2312,97 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-25 15:47 – 17:09 +06 · the simulated arm stops short of the eye; URGENT every 20 ms
+
+What changed (decisions D-079 to D-083):
+
+- **A simulated arm in sink** (`src/common/arm_model.c`, `arm_drive.c`, no QNX headers, host tests in `tests/test_arm.c`). Planar, three joints, links 0.40 / 0.35 / 0.10 m; approach speed 250 mm/s, braking 1.25 m/s² (25.0 mm), stop margin 10 mm. The parameters were fixed in D-079 before any run and were not changed afterwards.
+- **The brake engages from the sink receive thread.** On an URGENT that carries "person in", the receive thread writes the brake time (its receive time) and a flag with atomic stores before it answers. There is no lock, no print and no wait for the model. The model thread (CPU 0, priority 15, a 2 ms absolute step) computes what follows from that time. The brake also engages when the network state does not allow motion (INIT, SAFE, LOCKED_SAFE).
+- **source takes `person in`, `person out`, `arm eye`, `arm home` and `arm cycle`** on `/dev/signal-source`. The event time is the moment `io_write` takes the command. A pulse at priority 30 makes the timer thread issue the URGENT at once. COMMAND carries the joint target.
+- **The source schedule no longer drifts.** The next due time is the previous due time plus the period, not now plus the period (D-081).
+- **telemetry gives the arm state only to a client that sends `arm`.** The plain snapshot and the panel are unchanged.
+
+One build for every result below:
+
+```text
+4bd87c959fac9199978a3d75b373590a45513f54  source
+9db863a7360b751aa853ec550b59aea6de836dff  sink
+b2eec80c8f304f2c2701525040caa1884fc1408e  relay
+ae44053629a93d1a7514cf5399d4d2296ea07304  supervisor
+593fe77730320b72e1481406107b2ec53cba175f  telemetry
+0c1afdf45b3ed86a8dec2395e8baf225e597d435  stall-probe
+0caf2c57e19370757e6cd0ade9dcbfde83a9a54c  hold-next (test program)
+```
+
+relay was rebuilt only because the signal grew from 64 to 88 bytes. Its code did not change.
+
+### The arm stop (`make run-arm-stop`, 34 calm and 34 flooded runs, watchdog 120 s on each)
+
+In each run, the live network starts with a quiet log and the stall probe. The arm goes home, then (in the flooded runs) `flood on`, then `arm eye`. `person in` comes 200–560 ms (random) into the approach, `person out` 0.6 s later, then `stop`. Each run ends with `unaccounted 0`. Logs: `build/arm/runs/20261125-154720/`.
+
+| | calm | flood |
+|---|---|---|
+| delay from `person in` to the brake: median | 1.748 ms | 0.668 ms |
+| p99 = worst run (nearest rank of 34) | 3.013 ms (calm-08) | 1.421 ms (flood-21) |
+| of the median: command to URGENT issue / issue to brake | 0.35 / 1.37 ms | 0.14 / 0.53 ms |
+| reaction path: median / worst | 0.437 / 0.753 mm | 0.168 / 0.355 mm |
+| braking path | 25.0 mm | 25.0 mm |
+| stopped before the eye / in the 10 mm margin | 34 / 34 of 34 | 34 / 34 of 34 |
+| closest the tool came to rest | 30.5 mm (calm-11) | 32.4 mm (flood-11) |
+| model step: median / max | 35–87 µs / 14.8 ms | 16–26 µs / 10.6 ms |
+| steps over 1 ms | 154 of 33281 | 37 of 42924 |
+| URGENT that arrived during a model step | 18 | 23 |
+| late URGENT or COMMAND outside guest stalls and faults | 0 | 0 |
+
+The delay is shorter under flood than in calm, for the same reason as in F-031: busy vCPUs do not sleep, and waking a sleeping guest under TCG costs about a millisecond. The model steps over 1 ms match guest stalls; the brake is computed from the receive time, so a late step only catches up.
+
+### The model does not delay the URGENT receive
+
+The receive thread runs at 30, above the model thread at 15, on the same CPU. Of the URGENT that arrived during a model step (18 calm, 23 flood), none was late. `make measure` N=34 was run twice on the same build: with the arm, and with `SIGNAL_ARM=0` (no model thread):
+
+| URGENT latency (median / p99 / max, µs) | with the arm | without the arm |
+|---|---|---|
+| calm, total | 898.0 / 1871.0 / 1894.0 | 834.5 / 1881.0 / 1970.0 |
+| calm, hop 3 (relay B → sink) | 367.5 / 738.0 / 742.0 | 364.0 / 565.0 / 615.0 |
+| flood, total | 827.0 / 1902.0 / 1904.0 | 838.5 / 1928.0 / 1979.0 |
+| flood, hop 3 (relay B → sink) | 373.0 / 531.0 / 585.0 | 355.5 / 617.0 / 664.0 |
+
+The hop-3 medians differ by at most 18 µs. Calm hop-3 p99 is 173 µs higher with the arm, in 102 signals; in flood it is lower with the arm. R5 violations 0 and late 0 in all 136 runs. Logs: `build/measure-b27/` (with the arm).
+
+### URGENT every 20 ms (S2)
+
+| | B26 | B27 |
+|---|---|---|
+| URGENT in the 5 s S2 window (`scripts/s2-series.sh 10`) | 249–256 | 327–328 |
+| in flood | — | 251–254 |
+| longest gap | 31.3–32.7 ms | 21.4–23.9 ms |
+| URGENT median | 869504–903000 ns | 971008–1072000 ns |
+| URGENT max | — | 2056992–7110992 ns |
+
+The thresholds did not change. S2 still requires every URGENT on time and n ≥ 100 (n below 100 in 0 of 10), and R5 violations 0.
+
+### Commands and results (one build, guest `-smp 2` without `-icount`, 15:47 – 17:09)
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 1326 PASS, 0 FAIL |
+| `make run-arm-stop` (34 + 34) | 0 | above |
+| `make arm-telemetry-check` | 0 | the plain client got 3 snapshots with no arm line; the `arm` client got 59 of 60 snapshots with the arm, eye distance 3.3–197.1 mm |
+| `make scenarios` ×5 | 0 each | `scenarios failed 0`. S2 URGENT on time 325–328 of 325–328. Median 971000–1158000 ns, max 2104000–6804000 ns, R5 0. The only late signals were held inside the faults of S3 (stopped relay B) |
+| `scripts/s2-series.sh 10` | 0 each | n below 100 in 0 of 10. Late 0, gaps over 40 ms 0 |
+| `make measure` (N=34) | 0 | R5 0. URGENT median calm 898000 ns (p99 1871008), flood 827000 ns (p99 1902000). Late in 68 runs: 0 |
+| `make measure` (N=34, `SIGNAL_ARM=0`) | 0 | R5 0. URGENT median calm 834496 ns, flood 838496 ns. Late 0 |
+| `make run-long-live` (600 s) | 0 | 178768 signals, `unaccounted 0`. Issued equals the sink totals (URGENT 29504, COMMAND 751, BACKGROUND 148513). Late 0. 1 stall over 5 ms, worst 5.1 ms |
+| `make run-live-restart` (300 s, four kills) | 0 | Each node restarted once, `unaccounted 0`. Issued URGENT 14336, COMMAND 371, BACKGROUND 206874, all accounted. Late 0. The panel showed both books kept |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `panel-check`, `run-hold-urgent` | 0 each | `unaccounted 0`. Late signals only in `run-stop`, all 11 inside its fault |
+| `make run-flood-hang` ×30 | 0 each | 30 of 30 passed. source gave up 25–32 s after the stop |
+| `make run-long-flood` ×5 | 0 each | `failed 0 of 5` |
+
+The Mac load average was 1.2–4.6 during the checks. No guest kernel stop.
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
