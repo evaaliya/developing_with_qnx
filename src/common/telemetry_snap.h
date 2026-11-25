@@ -59,6 +59,21 @@ struct telem_books {
     uint32_t sink_reset;
 };
 
+/*
+ * The arm in the sink (D-080). Integers only: joint angles in
+ * milliradians, eye distance in micrometres, tool speed in
+ * micrometres per second. have is 0 until a sink sent one.
+ */
+struct telem_arm {
+    int have;
+    int brake;
+    int person;
+    int32_t q_mrad[3];
+    uint32_t eye_um;
+    uint32_t speed_um_s;
+    uint32_t person_stops;
+};
+
 /* alive is -1 until a nodes report, 0 dead, 1 alive. */
 struct telem_node {
     int alive;
@@ -73,6 +88,7 @@ struct telem_snapshot {
     struct telem_node node[TELEM_NODES];
     struct telem_class klass[3];
     struct telem_books books;
+    struct telem_arm arm;
 };
 
 struct telem_window {
@@ -109,6 +125,7 @@ int telem_report_sink(char *buf, size_t cap, enum net_state state,
                       const struct telem_books *books);
 int telem_report_nodes(char *buf, size_t cap,
                        const struct telem_node node[TELEM_NODES]);
+int telem_report_arm(char *buf, size_t cap, const struct telem_arm *arm);
 
 /*
  * One kind-report. Fields that report does not carry stay as they were.
@@ -119,6 +136,14 @@ int telem_snapshot_merge_report(struct telem_snapshot *snap, const char *text);
 /* One TCP snapshot, ending in "end\n". */
 int telem_snapshot_format(const struct telem_snapshot *snap, char *buf,
                           size_t cap);
+
+/*
+ * The same snapshot with the arm line before "end", for a client that
+ * asked for it by sending "arm". The plain format stays as it was, so
+ * the panel of B21 reads it unchanged. "arm none" until a sink reported.
+ */
+int telem_snapshot_format_arm(const struct telem_snapshot *snap, char *buf,
+                              size_t cap);
 
 /* 0 on a complete snapshot. -1 leaves out unchanged. */
 int telem_snapshot_parse(const char *text, struct telem_snapshot *out);

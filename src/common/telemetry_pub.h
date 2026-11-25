@@ -23,6 +23,12 @@ int telem_pub_open(const char *who);
 void telem_pub_post(const char *text, size_t n);
 
 /*
+ * A second slot for a second report of the same process (the arm of the
+ * sink, D-080). Never waits; the publisher sends both slots.
+ */
+void telem_pub_post_aux(const char *text, size_t n);
+
+/*
  * Waits for the slot, then for the publisher thread to send this text.
  * For process exit, not for the signal path.
  */

@@ -33,6 +33,8 @@ static int pub_started;
 static int pub_stop;
 static char slot[TELEM_REPORT_CAP];
 static size_t slot_len;
+static char aux[TELEM_REPORT_CAP];
+static size_t aux_len;
 static int pub_fd = -1;
 
 static int open_fd(void)
@@ -101,7 +103,9 @@ static void *pub_main(void *arg)
     }
     for (;;) {
         char local[TELEM_REPORT_CAP];
+        char local_aux[TELEM_REPORT_CAP];
         size_t n;
+        size_t n_aux;
         int stopping;
         struct timespec pause;
 
@@ -111,8 +115,16 @@ static void *pub_main(void *arg)
             n = sizeof local;
         }
         memcpy(local, slot, n);
+        n_aux = aux_len;
+        if (n_aux > sizeof local_aux) {
+            n_aux = sizeof local_aux;
+        }
+        memcpy(local_aux, aux, n_aux);
         stopping = pub_stop;
         pthread_mutex_unlock(&slot_mu);
+        if (n_aux > 0) {
+            send_fd(pub_fd, local_aux, n_aux);
+        }
         if (n > 0) {
             send_fd(pub_fd, local, n);
         }
@@ -191,6 +203,24 @@ void telem_pub_post(const char *text, size_t n)
     memcpy(slot, text, n);
     slot[n] = '\0';
     slot_len = n;
+    pthread_mutex_unlock(&slot_mu);
+}
+
+void telem_pub_post_aux(const char *text, size_t n)
+{
+    if (!pub_started || text == NULL || n == 0 || n >= sizeof aux) {
+        return;
+    }
+    if (pthread_mutex_trylock(&slot_mu) != 0) {
+        return;
+    }
+    if (pub_stop) {
+        pthread_mutex_unlock(&slot_mu);
+        return;
+    }
+    memcpy(aux, text, n);
+    aux[n] = '\0';
+    aux_len = n;
     pthread_mutex_unlock(&slot_mu);
 }
 

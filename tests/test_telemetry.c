@@ -326,11 +326,78 @@ static void test_merge(void)
                telem_snapshot_merge_report(&snap, NULL), -1);
 }
 
+/* D-080: the arm report and the snapshot a client asked with the arm. */
+static void test_arm(void)
+{
+    struct telem_snapshot snap;
+    struct telem_snapshot parsed;
+    struct telem_arm arm;
+    char buf[TELEM_REPORT_CAP];
+    char plain[TELEM_REPORT_CAP];
+    int n;
+
+    telem_snapshot_init(&snap);
+    memset(&arm, 0, sizeof arm);
+    expect_int("no arm report before the sink has one",
+               telem_report_arm(buf, sizeof buf, &arm), -1);
+    n = telem_snapshot_format_arm(&snap, buf, sizeof buf);
+    expect_int("snapshot with the arm formats before a report", n > 0, 1);
+    expect_int("it says arm none", strstr(buf, "\narm none\nend\n") != NULL, 1);
+    n = telem_snapshot_format(&snap, plain, sizeof plain);
+    expect_int("plain snapshot has no arm line", strstr(plain, "arm") == NULL, 1);
+
+    arm.have = 1;
+    arm.brake = 1;
+    arm.person = 1;
+    arm.q_mrad[0] = -100;
+    arm.q_mrad[1] = 1600;
+    arm.q_mrad[2] = 1100;
+    arm.eye_um = 61234;
+    arm.speed_um_s = 0;
+    arm.person_stops = 3;
+    n = telem_report_arm(buf, sizeof buf, &arm);
+    expect_int("arm report formats", n > 0, 1);
+    expect_text("arm report text", buf,
+                "kind arm\n"
+                "arm brake on person in q1_mrad -100 q2_mrad 1600 q3_mrad 1100 "
+                "eye_um 61234 speed_um_s 0 person_stops 3\n"
+                "end\n");
+    expect_int("arm report merges", telem_snapshot_merge_report(&snap, buf), 0);
+    expect_int("merged: brake", snap.arm.brake, 1);
+    expect_int("merged: joint 1", snap.arm.q_mrad[0], -100);
+    expect_u32("merged: eye", snap.arm.eye_um, 61234);
+    expect_u32("merged: stops", snap.arm.person_stops, 3);
+
+    n = telem_snapshot_format_arm(&snap, buf, sizeof buf);
+    expect_int("snapshot with the arm formats", n > 0, 1);
+    expect_int("snapshot with the arm parses",
+               telem_snapshot_parse(buf, &parsed), 0);
+    expect_u32("parsed arm eye", parsed.arm.eye_um, 61234);
+    n = telem_snapshot_format(&snap, plain, sizeof plain);
+    expect_int("the plain snapshot still has no arm line",
+               strstr(plain, "arm") == NULL, 1);
+
+    expect_int("arm none is not a report",
+               telem_snapshot_merge_report(&snap, "kind arm\narm none\nend\n"),
+               -1);
+    expect_int("a bad brake word is refused",
+               telem_snapshot_merge_report(
+                   &snap, "kind arm\narm brake maybe person in q1_mrad 0 "
+                          "q2_mrad 0 q3_mrad 0 eye_um 0 speed_um_s 0 "
+                          "person_stops 0\nend\n"),
+               -1);
+    expect_int("a short arm line is refused",
+               telem_snapshot_merge_report(&snap, "kind arm\narm brake on\nend\n"),
+               -1);
+    expect_int("the arm kept its values", snap.arm.person_stops == 3, 1);
+}
+
 int main(void)
 {
     test_window();
     test_roundtrip();
     test_merge();
+    test_arm();
     if (failures != 0) {
         printf("%d test(s) failed\n", failures);
         return EXIT_FAILURE;

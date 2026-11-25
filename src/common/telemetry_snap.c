@@ -338,8 +338,54 @@ int telem_report_nodes(char *buf, size_t cap,
     return (int)used;
 }
 
+static int append_arm(char *buf, size_t cap, size_t *used,
+                      const struct telem_arm *arm)
+{
+    if (!arm->have) {
+        return append_text(buf, cap, used, "arm none\n");
+    }
+    return append_text(buf, cap, used,
+                       "arm brake %s person %s q1_mrad %" PRId32
+                       " q2_mrad %" PRId32 " q3_mrad %" PRId32
+                       " eye_um %" PRIu32 " speed_um_s %" PRIu32
+                       " person_stops %" PRIu32 "\n",
+                       arm->brake ? "on" : "off", arm->person ? "in" : "out",
+                       arm->q_mrad[0], arm->q_mrad[1], arm->q_mrad[2],
+                       arm->eye_um, arm->speed_um_s, arm->person_stops);
+}
+
+int telem_report_arm(char *buf, size_t cap, const struct telem_arm *arm)
+{
+    size_t used = 0;
+
+    if (buf == NULL || cap == 0 || arm == NULL || !arm->have) {
+        return -1;
+    }
+    if (append_text(buf, cap, &used, "kind arm\n") != 0 ||
+        append_arm(buf, cap, &used, arm) != 0 ||
+        append_text(buf, cap, &used, "end\n") != 0) {
+        return -1;
+    }
+    return (int)used;
+}
+
+static int format_snapshot(const struct telem_snapshot *snap, char *buf,
+                           size_t cap, int with_arm);
+
 int telem_snapshot_format(const struct telem_snapshot *snap, char *buf,
                           size_t cap)
+{
+    return format_snapshot(snap, buf, cap, 0);
+}
+
+int telem_snapshot_format_arm(const struct telem_snapshot *snap, char *buf,
+                              size_t cap)
+{
+    return format_snapshot(snap, buf, cap, 1);
+}
+
+static int format_snapshot(const struct telem_snapshot *snap, char *buf,
+                           size_t cap, int with_arm)
 {
     size_t used = 0;
     int i;
@@ -373,6 +419,9 @@ int telem_snapshot_format(const struct telem_snapshot *snap, char *buf,
                     snap->books.source_resumes, snap->books.source_reset,
                     snap->books.waiting, snap->books.sink_resumes,
                     snap->books.sink_reset) != 0) {
+        return -1;
+    }
+    if (with_arm && append_arm(buf, cap, &used, &snap->arm) != 0) {
         return -1;
     }
     if (append_text(buf, cap, &used, "end\n") != 0) {
@@ -529,7 +578,8 @@ enum report_kind {
     KIND_FULL = 1,
     KIND_SINK = 2,
     KIND_SOURCE = 3,
-    KIND_NODES = 4
+    KIND_NODES = 4,
+    KIND_ARM = 5
 };
 
 struct parse_flags {
@@ -543,6 +593,7 @@ struct parse_flags {
     int class_issued[3];
     int class_sink[3];
     int books;
+    int arm;
     int ended;
 };
 
@@ -722,6 +773,75 @@ static int take_node(struct telem_snapshot *snap, char **words, int n,
     return 0;
 }
 
+/*
+ * "arm brake on|off person in|out q1_mrad A q2_mrad B q3_mrad C eye_um E
+ * speed_um_s S person_stops P" in a kind arm report, or in a snapshot
+ * a client asked with the arm; "arm none" only in a snapshot.
+ */
+static int take_arm(struct telem_snapshot *snap, char **words, int n,
+                    struct parse_flags *flags)
+{
+    static const char *keys[] = { "brake", "person", "q1_mrad", "q2_mrad",
+                                  "q3_mrad", "eye_um", "speed_um_s",
+                                  "person_stops" };
+    struct telem_arm a;
+    int64_t v;
+    uint32_t u;
+    int i;
+
+    if (flags->arm || (flags->kind != KIND_ARM && flags->kind != KIND_FULL &&
+                       flags->kind != KIND_NONE)) {
+        return -1;
+    }
+    if (n == 2 && strcmp(words[1], "none") == 0 && flags->kind != KIND_ARM) {
+        memset(&snap->arm, 0, sizeof snap->arm);
+        flags->arm = 1;
+        return 0;
+    }
+    if (n != 17) {
+        return -1;
+    }
+    for (i = 0; i < 8; i++) {
+        if (strcmp(words[1 + 2 * i], keys[i]) != 0) {
+            return -1;
+        }
+    }
+    memset(&a, 0, sizeof a);
+    a.have = 1;
+    if (strcmp(words[2], "on") == 0) {
+        a.brake = 1;
+    } else if (strcmp(words[2], "off") != 0) {
+        return -1;
+    }
+    if (strcmp(words[4], "in") == 0) {
+        a.person = 1;
+    } else if (strcmp(words[4], "out") != 0) {
+        return -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (parse_i64(words[6 + 2 * i], &v) != 0 || v < INT32_MIN ||
+            v > INT32_MAX) {
+            return -1;
+        }
+        a.q_mrad[i] = (int32_t)v;
+    }
+    if (parse_u32(words[12], &u) != 0) {
+        return -1;
+    }
+    a.eye_um = u;
+    if (parse_u32(words[14], &u) != 0) {
+        return -1;
+    }
+    a.speed_um_s = u;
+    if (parse_u32(words[16], &u) != 0) {
+        return -1;
+    }
+    a.person_stops = u;
+    snap->arm = a;
+    flags->arm = 1;
+    return 0;
+}
+
 static int flags_complete(const struct parse_flags *flags)
 {
     int i;
@@ -768,6 +888,9 @@ static int flags_complete(const struct parse_flags *flags)
         }
         return 1;
     }
+    if (flags->kind == KIND_ARM) {
+        return flags->arm;
+    }
     if (flags->kind == KIND_NODES) {
         for (i = 0; i < TELEM_NODES; i++) {
             if (!flags->node[i]) {
@@ -809,6 +932,8 @@ static int take_line(struct telem_snapshot *snap, char *line,
             flags->kind = KIND_SOURCE;
         } else if (strcmp(words[1], "nodes") == 0) {
             flags->kind = KIND_NODES;
+        } else if (strcmp(words[1], "arm") == 0) {
+            flags->kind = KIND_ARM;
         } else {
             return -1;
         }
@@ -888,6 +1013,9 @@ static int take_line(struct telem_snapshot *snap, char *line,
     }
     if (strcmp(words[0], "books") == 0) {
         return take_books(snap, words, n, flags);
+    }
+    if (strcmp(words[0], "arm") == 0) {
+        return take_arm(snap, words, n, flags);
     }
     if (strcmp(words[0], "class") == 0) {
         if (flags->kind == KIND_SOURCE ||

@@ -152,7 +152,8 @@ static void drop_client(int *client)
     }
 }
 
-static int write_snapshot(int client, struct telem_snapshot *snap, int64_t now)
+static int write_snapshot(int client, struct telem_snapshot *snap, int64_t now,
+                          int with_arm)
 {
     char buf[TELEM_REPORT_CAP];
     int n;
@@ -160,7 +161,9 @@ static int write_snapshot(int client, struct telem_snapshot *snap, int64_t now)
 
     snap->time_ns = now;
     snap->seq++;
-    n = telem_snapshot_format(snap, buf, sizeof buf);
+    /* Only a client that sent "arm" gets the arm line (D-080). */
+    n = with_arm ? telem_snapshot_format_arm(snap, buf, sizeof buf)
+                 : telem_snapshot_format(snap, buf, sizeof buf);
     if (n < 0) {
         snap->seq--;
         fprintf(stderr, "telemetry: the snapshot did not fit\n");
@@ -219,6 +222,7 @@ int main(void)
     int tcp;
     int udp;
     int client = -1;
+    int client_arm = 0;
     uint64_t reports = 0;
     uint64_t emitted_reports = 0;
     int64_t last_emit_ns = 0;
@@ -289,6 +293,7 @@ int main(void)
                         fflush(stdout);
                     }
                     client = fd;
+                    client_arm = 0;
                     last_emit_ns = 0;
                 }
             }
@@ -296,8 +301,16 @@ int main(void)
         if (client_slot >= 0 &&
             (fds[client_slot].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
             char junk[256];
-            ssize_t got = read(client, junk, sizeof junk);
+            ssize_t got = read(client, junk, sizeof junk - 1);
 
+            if (got > 0) {
+                junk[got] = '\0';
+                if (strstr(junk, "arm") != NULL && !client_arm) {
+                    client_arm = 1;
+                    printf("telemetry: the client asked for the arm\n");
+                    fflush(stdout);
+                }
+            }
             if (got == 0 ||
                 (got < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
                  errno != EINTR)) {
@@ -315,7 +328,7 @@ int main(void)
             now - last_emit_ns < 200000000LL) {
             continue;
         }
-        if (write_snapshot(client, &snap, now) != 0) {
+        if (write_snapshot(client, &snap, now, client_arm) != 0) {
             drop_client(&client);
             continue;
         }
