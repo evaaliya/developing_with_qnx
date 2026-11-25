@@ -93,6 +93,7 @@ In the live network the source closes issued numbers while it runs, so a run has
 | `make run-long-live` | The live network for 10 minutes with two floods, mute and restore |
 | `make run-live-restart` | 5 minutes under the supervisor; relay A, relay B, sink, and source each killed once |
 | `make panel-check` | Presses the panel buttons against the live network |
+| `make run-arm-stop` | 34 calm and 34 flooded runs of the simulated arm: "person in" at a random moment of the approach to the eye; delay to the brake, reaction and braking path, whether the arm stopped short of the eye |
 
 Other targets (`run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `run-flood-hang`, `run-hold-urgent`, `run-long-flood`) each check one fault or load case. `scripts/series.sh N TARGET` runs a target N times and keeps every run's log under `build/series/`. Every target prints `PASS` or `FAIL` and exits non-zero on failure.
 
