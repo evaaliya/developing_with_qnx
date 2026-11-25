@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -314,3 +314,7 @@ run-arm-stop: upload
 	  done; \
 	done
 	/usr/bin/ruby scripts/arm_report.rb $(ARM_DIR)/calm-*.log $(ARM_DIR)/flood-*.log | tee $(ARM_DIR)/report.txt
+
+# Telemetry gives the arm to a client that sends "arm" (D-080).
+arm-telemetry-check: upload
+	python3 scripts/arm-telemetry-check.py
