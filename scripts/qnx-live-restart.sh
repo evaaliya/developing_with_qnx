@@ -58,6 +58,10 @@ node_pid() {
 
 echo "guest: $(uname -a)"
 stop_all
+# qconn starts at every guest boot and keeps TCP 8000, which telemetry
+# needs for the panel (F-026). It ignores SIGTERM. On a freshly booted
+# guest this check failed with telemetry restarting every 0.5 s (B26).
+slay -Q -f -s SIGKILL qconn >/dev/null 2>&1 || true
 rm -f /tmp/supervisor.out /tmp/source.out /tmp/sink.out /tmp/relay-a.out \
     /tmp/relay-b.out /tmp/telemetry.out /tmp/live-restart-events.txt \
     /tmp/stall-probe.out
