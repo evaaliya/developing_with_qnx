@@ -21,7 +21,10 @@
 #
 # A run fails when its log is not a whole run (arm_compare.rb), when the
 # zone sensor did not report the planned event, or when the tool at the
-# event was more than 0.05 mm off 32.75 mm by the track of the model.
+# event was more than 0.05 mm off 32.75 mm by the track of the model
+# (for example when the network held the arm in SAFE during the approach,
+# so it lagged behind the plan). Such a run is named on a line of its
+# own and left out of the medians, p99, worst, touches and the video.
 # Our network touching the eye fails; the naive one touching it is a
 # result. Exit 1 when any run failed.
 #
@@ -139,6 +142,7 @@ module ArmPrecise
       end
       rows << row
       if row[:event_off_mm].abs > EVENT_TOL_MM
+        row[:off_plan] = true
         bad << format("%s: the tool was %.3f mm from the eye at the event, not %.2f +- %.2f",
                       row[:name], row[:event_mm], EVENT_MM, EVENT_TOL_MM)
       end
@@ -164,8 +168,15 @@ module ArmPrecise
                       r[:rest_mm], r[:past_plan_mm], r[:touched] ? "yes" : "no", r[:stop_signal],
                       r[:stop_fate].tr(" ", "_"), list.empty? ? "-" : list, r[:woke_late_ns] / 1000.0)
     end
-    rows.group_by { |r| [r[:net] == "ours" ? 0 : 1, r[:mode]] }.sort.each do |(_, mode), group|
-      tag = "arm-precise #{group.first[:net]} #{mode}"
+    rows.group_by { |r| [r[:net] == "ours" ? 0 : 1, r[:mode]] }.sort.each do |(_, mode), all|
+      tag = "arm-precise #{all.first[:net]} #{mode}"
+      off = all.select { |r| r[:off_plan] }
+      group = all.reject { |r| r[:off_plan] }
+      out.puts format("%s runs %d, failed the event check %d%s; the numbers below are over %d runs",
+                      tag, all.length, off.length,
+                      off.empty? ? "" : " (#{off.map { |r| format('%s %.3f mm', r[:name], r[:event_mm]) }.join(', ')})",
+                      group.length)
+      next if group.empty?
       person = group.select { |r| r[:brake_by] == "person" && r[:delay_ns] }
       worst = person.max_by { |r| r[:delay_ns] }
       out.puts format("%s n %d delay %s%s; braked by the person %d, by SAFE %d, no brake %d",
@@ -189,13 +200,13 @@ module ArmPrecise
       out.puts format("%s late URGENT or COMMAND outside guest stalls and faults %d; runs without a late-check line %d",
                       tag, lates.compact.sum { |l| l[/outside (\d+)/, 1].to_i }, lates.count(&:nil?))
     end
-    ours = rows.select { |r| r[:net] == "ours" && r[:mode] == "flood" }
+    ours = rows.select { |r| r[:net] == "ours" && r[:mode] == "flood" && !r[:off_plan] }
     unless ours.empty?
       w = ours.min_by { |r| worst_key(r) }
       out.puts format("arm-precise video ours flood %s: rest %.2f mm from the eye, %.2f mm past the plan, delay %s ms, stop signal %s",
                       w[:name], w[:rest_mm], w[:past_plan_mm], ArmCompare.fmt_ms(w[:delay_ns]), w[:stop_fate])
     end
-    naive = rows.select { |r| r[:net] == "naive" }
+    naive = rows.select { |r| r[:net] == "naive" && !r[:off_plan] }
     v = naive.empty? ? nil : naive_video(naive)
     if v
       out.puts format("arm-precise video naive %s: %s, rest %.2f mm from the eye, extra path %s mm, delay %s ms, stop signal %s",

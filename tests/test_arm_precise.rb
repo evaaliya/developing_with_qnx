@@ -48,6 +48,11 @@ Dir.mktmpdir do |tmp|
   code = ArmPrecise.report([File.join(tmp, "ours-calm-02.log")], out)
   check("an event 0.25 mm off the plan fails the run",
         code == 1 && out.string.include?("arm-precise FAIL ours-calm-02: the tool was 32.500 mm from the eye at the event, not 32.75 +- 0.05"))
+  out = StringIO.new
+  ArmPrecise.report([ours, File.join(tmp, "ours-calm-02.log")], out)
+  check("a run off the plan is named and left out of the numbers",
+        out.string.include?("arm-precise ours calm runs 2, failed the event check 1 (ours-calm-02 32.500 mm); the numbers below are over 1 runs") &&
+        out.string.include?("arm-precise ours calm closest to the eye 7.05 mm (ours-calm-01); touched the eye 0 of 1"))
 
   # No person-plan line: the zone sensor did not issue the event.
   File.write(File.join(tmp, "naive-calm-03.log"), File.read(naive).gsub(/^source: person-plan .*\n/, "").gsub("build/arm", "x"))
