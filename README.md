@@ -18,7 +18,7 @@ This project floods the network, kills its nodes, and measures what happens to t
 | | |
 |---|---|
 | QNX | QNX Software Development Platform 8.0 (`uname -a`: `QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le`) |
-| Target | QEMU `virt`, Cortex-A57, aarch64le, 2 CPUs (`-smp 2`), 1 GB, software emulation (TCG) on a Mac. The network nodes are pinned to CPU 0; with `-smp 1` the flood takes the only CPU and the guest stops answering |
+| Target | QEMU `virt`, Cortex-A57, aarch64le, 2 CPUs (`-smp 2`), 1 GB, software emulation (TCG) on a Mac, without `-icount`. The network nodes are pinned to CPU 0; with `-smp 1` the flood takes the only CPU and the guest stops answering; with `-icount` the guest stalls far more often |
 | Toolchain | `ntoaarch64-gcc` (GCC 12.2.0) from the SDP, run inside a Docker container (`docker-mac/`) |
 | Host tools | `make`, `cc`, Ruby (panel and reports), Python 3 (telemetry check) |
 
@@ -130,16 +130,19 @@ Use the buttons, or write a command on the guest: `echo 'flood on' > /dev/signal
 
 From one build on 2026-11-25 (full output in [QNX_EVIDENCE.md](QNX_EVIDENCE.md)):
 
-- **Five minutes, four kills under flood** (`make run-live-restart`): every node restarted once, `unaccounted 0`; issued URGENT 11065, COMMAND 368, BACKGROUND 203482, all accounted.
-- **Ten minutes of the live network** (`make run-long-live`): 173911 signals, `unaccounted 0`, no late URGENT.
-- **Scenarios** (`make scenarios`, five times in a row, all pass): S2 issues 214–224 URGENT in its 5 s flood window, all on time, slowest 7.4 ms against a 31 ms deadline.
-- **Latency** (`make measure`, 34 runs each): URGENT median 1.03 ms calm, 1.05 ms under flood.
-- `make test`: 1143 checks pass.
+- **Five minutes, four kills under flood** (`make run-live-restart`): every node restarted once, `unaccounted 0`; issued URGENT 11171, COMMAND 368, BACKGROUND 208163, all accounted.
+- **Ten minutes of the live network** (`make run-long-live`): 173480 signals, `unaccounted 0`, no late URGENT.
+- **Scenarios** (`make scenarios`, five times in a row, all pass): S2 URGENT median 0.89–0.90 ms under flood, slowest 5.1 ms against a 31 ms deadline.
+- **Latency** (`make measure`, 34 runs each): URGENT median 0.91 ms calm, 0.88 ms under flood.
+- **URGENT never waits behind a send already under way**: each relay sends URGENT from its own thread; of the URGENT that arrived during a BACKGROUND send, all were sent before that send ended.
+- `make test`: 1189 checks pass.
 
 ## Known limitations
 
-- The guest runs under software emulation and stops as a whole at times: over 300 s idle the stall probe saw 1126 stops over 5 ms, the worst 78 ms. A late URGENT or COMMAND is excused only when the stops on its way can cover how late it was; any other late signal fails the check.
-- The guest kernel has stopped three times on its own clock check (in `clock_ist`, the clock interrupt thread) under emulation, the last time on 2026-11-25. The cause is not known.
+- The guest runs under software emulation and stops as a whole when the Mac does not give QEMU a core: over 300 s idle the stall probe saw 115–1126 stops over 5 ms depending on what else the Mac was doing, the worst 78 ms; with all Mac cores busy, 626 in 60 s (`scripts/stall-host.sh`). A late URGENT or COMMAND is excused only when the stops on its way can cover how late it was; any other late signal fails the check.
+- The guest kernel has stopped five times on its own checks under emulation (three times on the clock check in `clock_ist`, twice on `nto_debug_fixme`), the last time on 2026-11-25 during a run with a stopped relay. The cause is not proven; the clock check fires when the counter is 55–120 ms behind, the size of the longest host stalls.
+- COMMAND still waits behind a BACKGROUND send already under way in a relay; only URGENT has its own forward thread.
+- The URGENT schedule of source drifts to every 20 or 30 ms (the next due time is counted from the moment of issue and checked on a 10 ms tick).
 - If the next node takes a signal and then never answers (stopped, not dead), the sending thread of source cannot be freed by its time limit. source still ends its run and gives up on the manifest; the process finishes exiting when that node dies.
 - Both ends of the network are simulated.
 

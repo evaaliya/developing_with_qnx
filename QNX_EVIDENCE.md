@@ -2230,3 +2230,85 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-25 05:27 – 08:40 +06 · guest stalls traced to the host, URGENT no longer waits behind BACKGROUND in the relays
+
+What changed (decisions D-073 to D-077):
+
+- **The relay receive thread waits for the next message at URGENT priority.** It dropped to its own priority (10) after each message and then stayed READY behind the flood work at 12 on CPU 0 before it reached `MsgReceive`; an URGENT sent to it waited too. `pidin` every 0.3 s during the S2 flood (45 snapshots per relay): before, relay A's receive thread was `10f READY` in 41 snapshots and relay B's in 35; after, `30f RECEIVE` in 38 and 40, never at 10. S2 now fails when a receive thread of source or either relay rests at 10.
+- **Each relay sends URGENT from its own forward thread.** With one forward thread an URGENT that arrived during a BACKGROUND send waited for that send to be answered and for the log line written after it. A second thread at URGENT priority takes only URGENT from the queue, in arrival order; the manifest waits for it.
+- **source keeps one timer thread.** Measured, not assumed: the URGENT that follows a scheduled BACKGROUND send left at most 1.87 ms after its tick (119 cases).
+- **Check series stop a run that hangs** (`scripts/watchdog.sh`, used by `scripts/series.sh`, every `make measure` run and every scenario) and keep the QEMU serial log when the guest does not answer.
+
+One build for every result below (relay changed; source and sink are the B25 binaries):
+
+```text
+b0b9e08e363cd91e716581cbfb2a6e93419bb9e2  source
+ec3e746a5f412d43cf1afd1f1e6997f3ea0f27d2  sink
+8c2854fc44c994cb1fb4ff246bd231229607ddcb  relay
+997bb3c90ddeb4d0b407edec15135ca2cf77b650  supervisor
+c4aca02b8f247513eea57ae44fbdcca07c7f6976  telemetry
+0c1afdf45b3ed86a8dec2395e8baf225e597d435  stall-probe
+c902098679634313872a786e7a6d30d8f82d52a9  hold-next (test program)
+```
+
+### Where the guest stalls come from
+
+`scripts/stall-host.sh` runs the stall probe on an idle guest and, at the same time, samples the Mac every 20 ms: the busy share of each core and the CPU time of each QEMU thread (`scripts/host-sample.c`, no root needed). Guest and host clocks are tied by reading the guest clock over ssh before and after; they drifted 0 ms in 300 s.
+
+Stalls against added host load (busy `yes` processes on the Mac, 60 s each):
+
+| Host load | stalls over 5 ms | over 10 ms | over 20 ms | worst |
+|---|---|---|---|---|
+| none added | 14 | 1 | 0 | 12.6 ms |
+| 4 busy processes | 18 | 6 | 3 | 38.8 ms |
+| 8 busy processes (all cores) | 626 | 92 | 3 | 22.0 ms |
+
+During stalls over 20 ms in an ordinary 300 s run, the Mac cores were 77–96 % busy against 21–31 % the rest of the time, while the QEMU vCPU threads got no more CPU than usual. The guest stops when macOS does not give the QEMU vCPU thread a core.
+
+QEMU with `-icount shift=auto` (everything else the same, same build), 300 s idle:
+
+| | stalls over 5 ms | over 20 ms | over 50 ms | worst | stall time |
+|---|---|---|---|---|---|
+| without `-icount` | 148 | 12 | 1 | 62.3 ms | 1586 ms |
+| with `-icount` | 2851 | 1559 | 31 | 75.5 ms | 57745 ms |
+
+With `-icount`, `make scenarios` failed 5 of 5 (in S1 only 91 of 171 URGENT on time, median 23.3 ms) and `make measure` passed with a worse URGENT median (1588664 ns calm, 2004984 ns under flood). The guest stays without `-icount` (D-076).
+
+### URGENT behind a send already under way (S2, 10 runs each)
+
+| | URGENT that arrived during a COMMAND or BACKGROUND send | sent before that send ended | taken from the queue after arrival: median / max |
+|---|---|---|---|
+| relay A, one forward thread | 601 | 0 | 0.843 / 13.39 ms |
+| relay A, URGENT thread | 593 | 593 | 0.302 / 4.10 ms |
+| relay B, one forward thread | 633 | 0 | 0.262 / 8.31 ms |
+| relay B, URGENT thread | 681 | 681 | 0.224 / 1.40 ms |
+
+### URGENT gaps over 40 ms in S2
+
+The source schedule sets the next due time as "now + period" and checks it on a 10 ms tick, so URGENT leaves every 2 or 3 ticks (873 intervals of 20 ms, 1291 of 30 ms in one series): the usual longest gap is about 31 ms. Gaps over 40 ms add a delayed issue on top. In the run traced for it, the timer thread wrote its log line for 11.7 ms and then waited 20.9 ms for relay A's receive thread, which was resting at priority 10 (fixed above). In the final S2 series, no gap over 40 ms in 10 runs.
+
+### Commands and results (one build, guest `-smp 2` without `-icount`, 06:30 – 08:31)
+
+| Command | Exit | Result |
+|---|---|---|
+| `make test` | 0 | 1170 PASS, 0 FAIL (1189 after the watchdog tests were added) |
+| `make scenarios` ×5 | 0 each | `scenarios failed 0`; S2 URGENT n 251–257, median 886000–904504 ns, max 1868992–5109008 ns, R5 0; late only inside the faults of S3 |
+| `scripts/s2-series.sh 10` | 0 each | n below 100 in 0 of 10 (n 249–256); median 869504–903000 ns; late 0; longest gap 31.3–32.7 ms |
+| `make measure` (N=34) | 0 | R5 0; URGENT median calm 913504 ns (p99 2020000), flood 882000 ns (p99 1894000); late in 68 runs: 0 |
+| `make run-long-live` (600 s) | 0 | 173480 signals, `unaccounted 0`, issued equals the sink totals (URGENT 22870, COMMAND 745, BACKGROUND 149865); late 0; 162 stalls over 5 ms, worst 18.8 ms |
+| `make run-live-restart` (300 s, four kills) | 0 | each node restarted once, `unaccounted 0`, issued equals the sink totals (URGENT 11171); 2 late URGENT, inside guest stalls; the panel showed every restart |
+| `make run`, `run-flood`, `run-kill`, `run-lock`, `run-stop`, `run-source`, `run-dev`, `run-telemetry`, `panel-check`, `run-hold-urgent` | 0 each | `unaccounted 0` |
+| `make run-flood-hang` ×30 | 0 each | 30 of 30 passed; source gave up 25–32 s after the stop |
+| `make run-long-flood` ×5 | 0 each | late URGENT or COMMAND 0 in each |
+
+Two failures during the checks, both before the series above was completed:
+
+- The guest kernel stopped once more, in run 06 of a first `run-flood-hang` series (mute variant, relay A stopped, flood on): `Shutdown[1] S/C/F=5/4/3`, instruction `ffffff806007fb04` (`nto_debug_fixme@193`, the same check as on 2026-11-23), active address space `bin/sh`. Runs 01–05 had passed. The guest was restarted and the 30 runs above were done again from the start.
+- The first `run-live-restart` after that restart failed: `qconn` starts at every guest boot and holds TCP 8000, so `telemetry` could not listen and the panel saw no restarts. The check now kills `qconn` first, as the other panel checks already did; the run in the table is the one after the fix.
+
+Guest after all runs:
+
+```text
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
