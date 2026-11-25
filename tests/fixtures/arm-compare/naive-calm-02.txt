@@ -1,0 +1,76 @@
+# Synthetic, made from a real naive calm run (B28): no URGENT with the flag arrived, the tool touched the eye.
+guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+arm-stop: mode calm run 1 bindir /tmp/naive
+arm-stop: approach, person in after 260 ms
+--- source (exit 0) ---
+source: SCHED_FIFO ceiling 253, live signals to signal-relay-a, build naive
+source: path /dev/signal-source
+source: timer pulse every 10000000 ns, URGENT 20000000 ns, COMMAND 800000000 ns, BACKGROUND 500000000 ns
+source: flood every 50000000 ns, first 72, burst 72, cap 72
+source: closed 15 signals 1..15, waiting 54
+source: closed 15 signals 16..30, waiting 54
+source: closed 13 signals 31..43, waiting 55
+source: closed 14 signals 44..57, waiting 55
+source: closed 14 signals 58..71, waiting 57
+source: closed 14 signals 72..85, waiting 57
+source: sent manifest of 69 signals
+source: sent 154 signals
+source: issued URGENT 142 COMMAND 6 BACKGROUND 6
+source: person-in event_ns 43370836212000 URGENT 90
+source: person-in URGENT 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 112 113 114 115 116 117 119 120 121 122 123 124
+--- relay A ---
+relay signal-relay-a: SCHED_FIFO ceiling 253, own 10, BACKGROUND 10, COMMAND 10, URGENT 10
+relay signal-relay-a: build naive, queue 64
+relay signal-relay-a: passed close of 15 signals 1..15, marked dropped 0
+relay signal-relay-a: passed close of 15 signals 16..30, marked dropped 0
+relay signal-relay-a: passed close of 13 signals 31..43, marked dropped 0
+relay signal-relay-a: passed close of 14 signals 44..57, marked dropped 0
+relay signal-relay-a: passed close of 14 signals 58..71, marked dropped 0
+relay signal-relay-a: passed close of 14 signals 72..85, marked dropped 0
+relay signal-relay-a: forwarded manifest of 69 signals
+relay signal-relay-a: boosts 0
+relay signal-relay-a: repicks 0
+relay signal-relay-a: dropped signal 90 class URGENT at 1 ns
+relay signal-relay-a: dropped signal 91 class URGENT at 2 ns
+--- relay B ---
+relay signal-relay-b: SCHED_FIFO ceiling 253, own 10, BACKGROUND 10, COMMAND 10, URGENT 10
+relay signal-relay-b: build naive, queue 64
+relay signal-relay-b: passed close of 15 signals 1..15, marked dropped 0
+relay signal-relay-b: passed close of 15 signals 16..30, marked dropped 0
+relay signal-relay-b: passed close of 13 signals 31..43, marked dropped 0
+relay signal-relay-b: passed close of 14 signals 44..57, marked dropped 0
+relay signal-relay-b: passed close of 14 signals 58..71, marked dropped 0
+relay signal-relay-b: passed close of 14 signals 72..85, marked dropped 0
+relay signal-relay-b: forwarded manifest of 69 signals
+relay signal-relay-b: link down signal-sink coid 1073741826
+relay signal-relay-b: boosts 0
+relay signal-relay-b: repicks 0
+--- sink (exit 0) ---
+sink: arm model every 2000000 ns at priority 15, speed 250 mm/s, brake 1.25 m/s^2, home 199.5 mm from the eye, build naive
+sink: state INIT at 43369217 ms
+sink: state NORMAL at 43369234 ms
+sink: closed 15 signals 1..15, lost 0, dropped 0, open 0, took 1464000 ns
+sink: closed 15 signals 16..30, lost 0, dropped 0, open 0, took 103008 ns
+sink: closed 13 signals 31..43, lost 0, dropped 0, open 0, took 152000 ns
+sink: closed 14 signals 44..57, lost 0, dropped 0, open 0, took 135008 ns
+sink: closed 14 signals 58..71, lost 0, dropped 0, open 0, took 98992 ns
+sink: closed 14 signals 72..85, lost 0, dropped 0, open 0, took 162992 ns
+sink: summary URGENT received 142, on time 142, late 0, lost 0, dropped 0
+sink: summary COMMAND received 6, on time 6, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 6, on time 6, late 0, lost 0, dropped 0
+sink: lost signal 92 class URGENT
+sink: unaccounted 0
+sink: arm model steps 1000, period 2000000 ns, priority 15, step median 44 us, max 1216992 ns, over 1 ms 4, URGENT inside a step 0, person stops 1, state stops 0, stop reports 1
+sink: arm-track start_ns 43370548113008 step_ns 2000000 samples 401 end touch brake_ns 0 brake_by none stop_number 0 touch_ns 43371347113008
+sink: arm-track-um 0 199525 199026 198527 198028 197529 197030 196531 196032 195533 195034 194535 194036 193537 193038 192539 192040 191541 191042 190543 190044 189545 189046 188547 188048 187549 187050 186551 186052 185553 185054 184555 184056 183557 183058 182559 182060 181561 181062 180563 180064 179565 179066 178567 178068 177569 177070 176571 176072 175573 175074 174575 174076 173577 173078 172579 172080 171581 171082 170583 170084 169585 169086 168587 168088
+sink: arm-track-um 64 167589 167090 166591 166092 165593 165094 164595 164096 163597 163098 162599 162100 161601 161102 160603 160104 159605 159106 158607 158108 157609 157110 156611 156112 155613 155114 154615 154116 153617 153118 152619 152120 151621 151122 150623 150124 149625 149126 148627 148128 147629 147130 146631 146132 145633 145134 144635 144136 143637 143138 142639 142140 141641 141142 140643 140144 139645 139146 138647 138148 137649 137150 136651 136152
+sink: arm-track-um 128 135653 135154 134655 134156 133657 133158 132659 132160 131661 131162 130663 130164 129665 129166 128667 128168 127669 127170 126671 126172 125673 125174 124675 124176 123677 123178 122679 122180 121681 121182 120683 120184 119685 119186 118687 118188 117689 117190 116691 116192 115693 115194 114695 114196 113697 113198 112699 112200 111701 111202 110703 110204 109705 109206 108707 108208 107709 107210 106711 106212 105713 105214 104715 104216
+sink: arm-track-um 192 103717 103218 102719 102220 101721 101222 100723 100224 99725 99226 98727 98228 97729 97230 96731 96232 95733 95234 94735 94236 93737 93238 92739 92240 91741 91242 90743 90244 89745 89246 88747 88248 87749 87250 86751 86252 85753 85254 84755 84256 83757 83258 82759 82260 81761 81262 80763 80264 79765 79266 78767 78268 77769 77270 76771 76272 75773 75274 74775 74276 73777 73278 72779 72280
+sink: arm-track-um 256 71781 71282 70783 70284 69785 69286 68787 68288 67789 67290 66791 66292 65793 65294 64795 64296 63797 63298 62799 62300 61801 61302 60803 60304 59805 59306 58807 58308 57809 57310 56811 56312 55813 55314 54815 54316 53817 53318 52819 52320 51821 51322 50823 50324 49825 49326 48827 48328 47829 47330 46831 46332 45833 45334 44835 44336 43837 43338 42839 42340 41841 41342 40843 40344
+sink: arm-track-um 320 39845 39346 38847 38348 37849 37350 36851 36352 35853 35354 34855 34356 33857 33358 32859 32360 31861 31362 30863 30364 29865 29366 28867 28368 27869 27370 26871 26372 25873 25374 24875 24376 23877 23378 22879 22380 21881 21382 20883 20384 19885 19386 18887 18388 17889 17390 16891 16392 15893 15394 14895 14396 13897 13398 12899 12400 11901 11402 10903 10404 9905 9406 8907 8408
+sink: arm-track-um 384 7909 7410 6911 6412 5913 5414 4915 4416 3917 3418 2919 2420 1921 1422 923 424 0
+late-check: stall probe from 43369142 ms, stalls over 5 ms 2, worst 11060000 ns
+late-check: late URGENT 0: inside guest stalls 0, inside faults 0, outside 0
+late-check: late COMMAND 0: inside guest stalls 0, inside faults 0, outside 0
+late-check: late inside guest stalls whose stall time seen covers the lateness 0 of 0 (the rest are covered only with the probe period)
+late-check: late URGENT or COMMAND inside guest stalls 0, inside faults 0, outside 0

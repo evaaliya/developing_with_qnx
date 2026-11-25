@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -53,6 +53,12 @@ default:
 
 all: default
 
+# The naive network (D-084): the same source, relay and sink built with
+# -DSIGNAL_NAIVE=1 into build/naive/.
+naive:
+	mkdir -p build/naive
+	docker exec qnx-build "$(PROJECT_DIR)/build.sh" naive
+
 test: build/latency-report
 	mkdir -p build
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-deadline \
@@ -89,6 +95,10 @@ test: build/latency-report
 		tests/test_drop_notes.c src/common/drop_notes.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-arm \
 		tests/test_arm.c src/common/arm_model.c src/common/arm_drive.c -lm
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-sched-ours \
+		tests/test_naive_sched.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -DSIGNAL_NAIVE=1 \
+		-o build/test-sched-naive tests/test_naive_sched.c
 	./build/test-deadline
 	./build/test-queue
 	./build/test-net-state
@@ -104,10 +114,14 @@ test: build/latency-report
 	./build/test-node-store
 	./build/test-drop-notes
 	./build/test-arm
+	./build/test-sched-ours
+	./build/test-sched-naive
 	sh tests/test_late_check.sh
 	bash tests/test_series_watchdog.sh
+	bash tests/test_arm_compare.sh
 	/usr/bin/ruby tests/test_panel.rb
 	/usr/bin/ruby tests/test_arm_report.rb
+	/usr/bin/ruby tests/test_arm_compare.rb
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
@@ -317,6 +331,30 @@ run-arm-stop: upload
 	  done; \
 	done
 	/usr/bin/ruby scripts/arm_report.rb $(ARM_DIR)/calm-*.log $(ARM_DIR)/flood-*.log | tee $(ARM_DIR)/report.txt
+
+upload-naive: naive
+	$(SSH) root@localhost "slay -Q -f source >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; mkdir -p /tmp/naive"
+	$(SCP) ./build/naive/source ./build/naive/sink ./build/naive/relay root@localhost:/tmp/naive/
+	$(SSH) root@localhost "chmod +x /tmp/naive/source /tmp/naive/sink /tmp/naive/relay"
+
+# The arm stop on our network and on the naive one in one guest boot, in
+# alternating blocks of ARM_BLOCK runs (D-086): ARM_N calm and ARM_N
+# flooded runs of each. The report names the worst run of each network;
+# ARM_DIR/replay/ holds the track of every run for the replay page (D-085).
+ARM_BLOCK ?= 2
+run-arm-compare: upload upload-naive
+	mkdir -p $(ARM_DIR)
+	ln -sfn runs/$(RUN_STAMP) build/arm/latest
+	echo "run-arm-compare: logs in $(ARM_DIR)"
+	$(SCP) ./scripts/qnx-arm-stop.sh root@localhost:/tmp/qnx-arm-stop.sh
+	$(SSH) root@localhost 'chmod +x /tmp/qnx-arm-stop.sh; uname -a' | tee $(ARM_DIR)/guest.txt
+	{ bash scripts/arm-compare.sh $(ARM_N) $(ARM_BLOCK) $(ARM_LIMIT_S) $(ARM_DIR); \
+	  echo $$? > $(ARM_DIR)/series.status; } | tee $(ARM_DIR)/series.txt
+	{ /usr/bin/ruby scripts/arm_compare.rb --replay $(ARM_DIR)/replay \
+	    $(ARM_DIR)/ours-*.log $(ARM_DIR)/naive-*.log; \
+	  echo $$? > $(ARM_DIR)/report.status; } | tee $(ARM_DIR)/report.txt
+	echo "run-arm-compare: series exit $$(cat $(ARM_DIR)/series.status), report exit $$(cat $(ARM_DIR)/report.status)"
+	[ "$$(cat $(ARM_DIR)/series.status)" = 0 ] && [ "$$(cat $(ARM_DIR)/report.status)" = 0 ]
 
 # Telemetry gives the arm to a client that sends "arm" (D-080).
 arm-telemetry-check: upload

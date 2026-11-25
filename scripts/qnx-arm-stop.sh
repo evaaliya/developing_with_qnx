@@ -4,7 +4,11 @@
 # at a random moment 200-560 ms into the approach. The sink prints one
 # "sink: arm-stop" line with the delay from the event to the brake and
 # both paths. Quiet logs (SIGNAL_QUIET=1): no line per signal.
-#   qnx-arm-stop.sh calm|flood [run-number]
+# BINDIR holds source, relay and sink: /tmp for our network, /tmp/naive
+# for the naive one (D-084). The run passes when the nodes exit 0, every
+# signal is accounted, and the track of the approach ended with a stop
+# or a touch of the eye (D-085); the report judges the stop.
+#   qnx-arm-stop.sh calm|flood [run-number] [BINDIR]
 set -eu
 
 mode=${1:-calm}
@@ -16,6 +20,10 @@ case "$mode" in
         ;;
 esac
 run=${2:-1}
+bindir=${3:-/tmp}
+for p in source relay sink; do
+    [ -x "$bindir/$p" ] || { echo "arm-stop: $bindir/$p is missing" >&2; exit 2; }
+done
 
 fail() {
     echo "arm-stop: $1" >&2
@@ -34,7 +42,7 @@ fail() {
 }
 
 echo "guest: $(uname -a)"
-echo "arm-stop: mode $mode run $run"
+echo "arm-stop: mode $mode run $run bindir $bindir"
 
 slay -Q -f supervisor >/dev/null 2>&1 || true
 slay -Q -f telemetry >/dev/null 2>&1 || true
@@ -45,13 +53,13 @@ rm -f /tmp/source.out /tmp/sink.out /tmp/relay-a.out /tmp/relay-b.out
 
 export SIGNAL_QUIET=1
 /tmp/qnx-late-check.sh start 60 || fail "the stall probe did not start"
-/tmp/sink 64 2000 > /tmp/sink.out 2>&1 &
+"$bindir/sink" 64 2000 > /tmp/sink.out 2>&1 &
 sink_pid=$!
-/tmp/relay signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
+"$bindir/relay" signal-relay-b signal-sink > /tmp/relay-b.out 2>&1 &
 relay_b=$!
-/tmp/relay signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 &
+"$bindir/relay" signal-relay-a signal-relay-b > /tmp/relay-a.out 2>&1 &
 relay_a=$!
-/tmp/source live signal-relay-a > /tmp/source.out 2>&1 &
+"$bindir/source" live signal-relay-a > /tmp/source.out 2>&1 &
 source_pid=$!
 
 i=0
@@ -125,10 +133,12 @@ cat /tmp/sink.out
 [ "$source_status" -eq 0 ] || exit "$source_status"
 [ "$sink_status" -eq 0 ] || exit "$sink_status"
 n=$(grep -c '^sink: arm-stop ' /tmp/sink.out || true)
-if [ "$n" -ne 1 ]; then
-    echo "arm-stop: expected one arm-stop line, found $n" >&2
+if [ "$n" -gt 1 ]; then
+    echo "arm-stop: expected at most one arm-stop line, found $n" >&2
     exit 1
 fi
+grep -E '^sink: arm-track start_ns .* end (stop|touch) ' /tmp/sink.out >/dev/null 2>&1 ||
+    { echo "arm-stop: the track of the approach did not end with a stop or a touch" >&2; exit 1; }
 grep 'sink: unaccounted 0' /tmp/sink.out >/dev/null 2>&1 ||
     { echo "arm-stop: sink has no unaccounted 0" >&2; exit 1; }
 exit 0

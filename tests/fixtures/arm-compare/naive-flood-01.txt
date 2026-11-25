@@ -1,0 +1,230 @@
+guest: QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+arm-stop: mode flood run 1 bindir /tmp/naive
+arm-stop: flood on
+arm-stop: approach, person in after 528 ms
+--- source (exit 0) ---
+source: SCHED_FIFO ceiling 253, live signals to signal-relay-a, build naive
+source: path /dev/signal-source
+source: timer pulse every 10000000 ns, URGENT 20000000 ns, COMMAND 800000000 ns, BACKGROUND 500000000 ns
+source: flood every 50000000 ns, first 72, burst 72, cap 72
+source: closed 15 signals 1..15, waiting 1278
+source: closed 375 signals 16..390, waiting 1278
+source: closed 300 signals 391..690, waiting 1278
+source: closed 302 signals 691..992, waiting 1351
+source: closed 302 signals 993..1294, waiting 1351
+source: closed 375 signals 1295..1669, waiting 1279
+source: closed 300 signals 1670..1969, waiting 992
+source: sent manifest of 1005 signals
+source: sent 2974 signals
+source: issued URGENT 153 COMMAND 6 BACKGROUND 2815
+source: person-in event_ns 43379379451008 URGENT 2119
+source: person-in URGENT 2119 2120 2193 2194 2195 2268 2269 2270 2344 2345 2346 2419 2421 2422 2495 2496 2497 2570 2571 2572 2645 2646 2719 2720 2721 2794 2795 2796 2869 2870 2871
+--- relay A ---
+relay signal-relay-a: SCHED_FIFO ceiling 253, own 10, BACKGROUND 10, COMMAND 10, URGENT 10
+relay signal-relay-a: build naive, queue 64
+relay signal-relay-a: passed close of 15 signals 1..15, marked dropped 0
+relay signal-relay-a: passed close of 375 signals 16..390, marked dropped 40
+relay signal-relay-a: passed close of 300 signals 391..690, marked dropped 32
+relay signal-relay-a: passed close of 302 signals 691..992, marked dropped 32
+relay signal-relay-a: passed close of 302 signals 993..1294, marked dropped 32
+relay signal-relay-a: passed close of 375 signals 1295..1669, marked dropped 40
+relay signal-relay-a: passed close of 300 signals 1670..1969, marked dropped 32
+relay signal-relay-a: forwarded manifest of 1005 signals
+relay signal-relay-a: boosts 0
+relay signal-relay-a: repicks 0
+--- relay B ---
+relay signal-relay-b: SCHED_FIFO ceiling 253, own 10, BACKGROUND 10, COMMAND 10, URGENT 10
+relay signal-relay-b: build naive, queue 64
+relay signal-relay-b: passed close of 15 signals 1..15, marked dropped 0
+relay signal-relay-b: passed close of 375 signals 16..390, marked dropped 0
+relay signal-relay-b: passed close of 300 signals 391..690, marked dropped 0
+relay signal-relay-b: passed close of 302 signals 691..992, marked dropped 0
+relay signal-relay-b: passed close of 302 signals 993..1294, marked dropped 0
+relay signal-relay-b: passed close of 375 signals 1295..1669, marked dropped 0
+relay signal-relay-b: passed close of 300 signals 1670..1969, marked dropped 0
+relay signal-relay-b: forwarded manifest of 1005 signals
+relay signal-relay-b: link down signal-sink coid 1073741826
+relay signal-relay-b: boosts 0
+relay signal-relay-b: repicks 0
+--- sink (exit 0) ---
+sink: arm model every 2000000 ns at priority 15, speed 250 mm/s, brake 1.25 m/s^2, home 199.5 mm from the eye, build naive
+sink: state INIT at 43377498 ms
+sink: state NORMAL at 43377524 ms
+sink: state DEGRADED at 43377780 ms
+sink: state NORMAL at 43377782 ms
+sink: at 43377812 ms sink: signal 89 class URGENT late, hops 54000 ns, 30183008 ns, 960000 ns, total 31197008 ns
+sink: late signal 89 class URGENT at 43377812 ms, total 31197008 ns
+sink: state SAFE at 43377812 ms
+sink: state RECOVERING at 43377813 ms
+sink: at 43377873 ms sink: signal 164 class URGENT late, hops 43008 ns, 32742992 ns, 976000 ns, total 33762000 ns
+sink: late signal 164 class URGENT at 43377873 ms, total 33762000 ns
+sink: state SAFE at 43377874 ms
+sink: state RECOVERING at 43377874 ms
+sink: at 43377934 ms sink: signal 239 class URGENT late, hops 44992 ns, 32726000 ns, 710000 ns, total 33480992 ns
+sink: late signal 239 class URGENT at 43377934 ms, total 33480992 ns
+sink: state SAFE at 43377934 ms
+sink: state RECOVERING at 43377935 ms
+sink: at 43377995 ms sink: signal 314 class URGENT late, hops 44000 ns, 33164000 ns, 1163008 ns, total 34371008 ns
+sink: late signal 314 class URGENT at 43377995 ms, total 34371008 ns
+sink: state SAFE at 43377995 ms
+sink: state RECOVERING at 43377995 ms
+sink: at 43378055 ms sink: signal 389 class URGENT late, hops 44000 ns, 33322992 ns, 1242000 ns, total 34608992 ns
+sink: late signal 389 class URGENT at 43378055 ms, total 34608992 ns
+sink: state SAFE at 43378055 ms
+sink: state RECOVERING at 43378056 ms
+sink: at 43378114 ms sink: signal 465 class URGENT late, hops 497008 ns, 33644000 ns, 1056000 ns, total 35197008 ns
+sink: late signal 465 class URGENT at 43378114 ms, total 35197008 ns
+sink: state SAFE at 43378115 ms
+sink: state RECOVERING at 43378115 ms
+sink: at 43378173 ms sink: signal 540 class URGENT late, hops 40992 ns, 32570000 ns, 977008 ns, total 33588000 ns
+sink: late signal 540 class URGENT at 43378173 ms, total 33588000 ns
+sink: state SAFE at 43378174 ms
+sink: state RECOVERING at 43378174 ms
+sink: state NORMAL at 43378230 ms
+sink: state DEGRADED at 43378256 ms
+sink: state NORMAL at 43378258 ms
+sink: state DEGRADED at 43378315 ms
+sink: state NORMAL at 43378316 ms
+sink: state DEGRADED at 43378376 ms
+sink: state NORMAL at 43378377 ms
+sink: state DEGRADED at 43378436 ms
+sink: state NORMAL at 43378437 ms
+sink: at 43378474 ms sink: signal 915 class URGENT late, hops 40000 ns, 33238992 ns, 1114000 ns, total 34392992 ns
+sink: late signal 915 class URGENT at 43378474 ms, total 34392992 ns
+sink: state SAFE at 43378475 ms
+sink: state RECOVERING at 43378475 ms
+sink: state NORMAL at 43378527 ms
+sink: state DEGRADED at 43378554 ms
+sink: state NORMAL at 43378555 ms
+sink: state DEGRADED at 43378614 ms
+sink: state NORMAL at 43378616 ms
+sink: state DEGRADED at 43378672 ms
+sink: state NORMAL at 43378673 ms
+sink: state DEGRADED at 43378730 ms
+sink: state NORMAL at 43378732 ms
+sink: closed 15 signals 1..15, lost 0, dropped 0, open 0, took 446000 ns
+sink: state DEGRADED at 43378790 ms
+sink: state NORMAL at 43378793 ms
+sink: state DEGRADED at 43378848 ms
+sink: state NORMAL at 43378849 ms
+sink: state DEGRADED at 43378898 ms
+sink: state NORMAL at 43378899 ms
+sink: at 43378931 ms sink: signal 1517 class URGENT late, hops 40000 ns, 30328000 ns, 858000 ns, total 31226000 ns
+sink: late signal 1517 class URGENT at 43378931 ms, total 31226000 ns
+sink: state SAFE at 43378932 ms
+sink: state RECOVERING at 43378932 ms
+sink: at 43378993 ms sink: signal 1592 class URGENT late, hops 40000 ns, 30308000 ns, 1128000 ns, total 31476000 ns
+sink: late signal 1592 class URGENT at 43378993 ms, total 31476000 ns
+sink: state SAFE at 43378994 ms
+sink: state RECOVERING at 43378995 ms
+sink: closed 375 signals 16..390, lost 0, dropped 40, open 0, took 310000 ns
+sink: at 43379054 ms sink: signal 1667 class URGENT late, hops 35008 ns, 32480000 ns, 1264992 ns, total 33780000 ns
+sink: late signal 1667 class URGENT at 43379054 ms, total 33780000 ns
+sink: state SAFE at 43379055 ms
+sink: state RECOVERING at 43379055 ms
+sink: at 43379114 ms sink: signal 1743 class URGENT late, hops 41008 ns, 31528992 ns, 917008 ns, total 32487008 ns
+sink: late signal 1743 class URGENT at 43379114 ms, total 32487008 ns
+sink: state SAFE at 43379115 ms
+sink: state RECOVERING at 43379115 ms
+sink: state NORMAL at 43379162 ms
+sink: state DEGRADED at 43379191 ms
+sink: state NORMAL at 43379192 ms
+sink: state DEGRADED at 43379241 ms
+sink: state NORMAL at 43379242 ms
+sink: at 43379274 ms sink: signal 1967 class URGENT late, hops 41008 ns, 33102992 ns, 911008 ns, total 34055008 ns
+sink: late signal 1967 class URGENT at 43379274 ms, total 34055008 ns
+sink: state SAFE at 43379274 ms
+sink: state RECOVERING at 43379275 ms
+sink: closed 300 signals 391..690, lost 0, dropped 32, open 0, took 120992 ns
+sink: at 43379367 ms sink: signal 2042 class URGENT late, hops 488992 ns, 51127008 ns, 14468992 ns, total 66084992 ns
+sink: late signal 2042 class URGENT at 43379367 ms, total 66084992 ns
+sink: state SAFE at 43379373 ms
+sink: at 43379375 ms sink: signal 2043 class URGENT late, hops 35008 ns, 33500000 ns, 21044000 ns, total 54579008 ns
+sink: late signal 2043 class URGENT at 43379375 ms, total 54579008 ns
+sink: state RECOVERING at 43379377 ms
+sink: at 43379412 ms sink: signal 2118 class URGENT late, hops 53008 ns, 33720000 ns, 2586992 ns, total 36360000 ns
+sink: late signal 2118 class URGENT at 43379412 ms, total 36360000 ns
+sink: state SAFE at 43379412 ms
+sink: at 43379413 ms sink: signal 2119 class URGENT late, hops 41008 ns, 29550000 ns, 3228000 ns, total 32819008 ns
+sink: late signal 2119 class URGENT at 43379413 ms, total 32819008 ns
+sink: state RECOVERING at 43379413 ms
+sink: state NORMAL at 43379448 ms
+sink: state DEGRADED at 43379480 ms
+sink: state NORMAL at 43379481 ms
+sink: state DEGRADED at 43379531 ms
+sink: state NORMAL at 43379532 ms
+sink: closed 302 signals 691..992, lost 0, dropped 32, open 0, took 138992 ns
+sink: state DEGRADED at 43379592 ms
+sink: state NORMAL at 43379593 ms
+sink: arm-stop event_ms 43379379 delay_ns 33598000 issue_to_brake_ns 32819008 speed_mm_s 250.0 reaction_mm 8.399 braking_mm 24.999 eye_event_mm 62.06 eye_brake_mm 53.67 eye_rest_mm 28.68 before_eye yes margin yes released no
+sink: state DEGRADED at 43379653 ms
+sink: state NORMAL at 43379654 ms
+sink: state DEGRADED at 43379710 ms
+sink: state NORMAL at 43379712 ms
+sink: state DEGRADED at 43379767 ms
+sink: state NORMAL at 43379769 ms
+sink: closed 302 signals 993..1294, lost 0, dropped 32, open 0, took 220000 ns
+sink: state DEGRADED at 43379824 ms
+sink: state NORMAL at 43379825 ms
+sink: at 43379857 ms sink: signal 2719 class URGENT late, hops 462000 ns, 33941008 ns, 874992 ns, total 35278000 ns
+sink: late signal 2719 class URGENT at 43379857 ms, total 35278000 ns
+sink: state SAFE at 43379858 ms
+sink: state RECOVERING at 43379858 ms
+sink: at 43379916 ms sink: signal 2794 class URGENT late, hops 44000 ns, 32136000 ns, 954992 ns, total 33134992 ns
+sink: late signal 2794 class URGENT at 43379916 ms, total 33134992 ns
+sink: state SAFE at 43379916 ms
+sink: state RECOVERING at 43379917 ms
+sink: at 43379974 ms sink: signal 2869 class URGENT late, hops 42000 ns, 30719008 ns, 746000 ns, total 31507008 ns
+sink: late signal 2869 class URGENT at 43379974 ms, total 31507008 ns
+sink: state SAFE at 43379975 ms
+sink: state RECOVERING at 43379975 ms
+sink: state NORMAL at 43380000 ms
+sink: state DEGRADED at 43380003 ms
+sink: state NORMAL at 43380006 ms
+sink: at 43380039 ms sink: signal 2946 class URGENT late, hops 37008 ns, 33956992 ns, 1031008 ns, total 35025008 ns
+sink: late signal 2946 class URGENT at 43380039 ms, total 35025008 ns
+sink: state SAFE at 43380040 ms
+sink: state RECOVERING at 43380040 ms
+sink: closed 375 signals 1295..1669, lost 0, dropped 40, open 0, took 133008 ns
+sink: state NORMAL at 43380063 ms
+sink: closed 300 signals 1670..1969, lost 0, dropped 32, open 0, took 924000 ns
+sink: state DEGRADED at 43380791 ms
+sink: summary URGENT received 153, on time 132, late 21, lost 0, dropped 0
+sink: summary COMMAND received 6, on time 6, late 0, lost 0, dropped 0
+sink: summary BACKGROUND received 2502, on time 2502, late 0, lost 0, dropped 313
+sink: unaccounted 0
+sink: arm model steps 1191, period 2000000 ns, priority 15, step median 20 us, max 1104992 ns, over 1 ms 1, URGENT inside a step 0, person stops 1, state stops 2, stop reports 1
+sink: arm-track start_ns 43378828620000 step_ns 2000000 samples 393 end stop brake_ns 43379413049008 brake_by person stop_number 2119 touch_ns 0
+sink: arm-track-um 0 199525 199026 198528 198029 197531 197032 196534 196035 195537 195038 194540 194041 193543 193044 192546 192047 191548 191050 190551 190053 189554 189056 188557 188058 187560 187061 186562 186064 185565 185067 184568 184069 183571 183072 182573 182075 181576 181077 180579 180080 179581 179083 178584 178085 177587 177088 176589 176091 175592 175093 174594 174096 173597 173098 172599 172101 171602 171103 170604 170106 169607 169108 168609 168111
+sink: arm-track-um 64 167612 167113 166614 166115 165617 165118 164619 164120 163621 163123 162624 162125 161626 161127 160628 160129 159631 159132 158633 158134 157635 157136 156637 156139 155640 155141 154642 154143 153644 153145 152646 152147 151648 151149 150650 150152 149653 149154 148655 148156 147657 147158 146659 146160 145661 145162 144663 144164 143665 143166 142667 142168 141669 141170 140671 140172 139673 139174 138675 138176 137677 137177 136678 136179
+sink: arm-track-um 128 135680 135181 134682 134183 133684 133185 132686 132187 131688 131188 130689 130190 129691 129192 128693 128194 127695 127195 126696 126197 125698 125199 124700 124201 123701 123202 122703 122204 121705 121205 120706 120207 119708 119209 118709 118210 117711 117212 116712 116213 115714 115215 114715 114216 113717 113218 112718 112219 111720 111221 110721 110222 109723 109223 108724 108225 107726 107226 106727 106228 105728 105229 104730 104230
+sink: arm-track-um 192 103731 103232 102732 102233 101733 101234 100735 100235 99736 99237 98737 98238 97738 97239 96740 96240 95741 95241 94742 94243 93743 93244 92744 92245 91745 91246 90747 90247 89748 89248 88749 88249 87750 87250 86751 86251 85752 85252 84753 84253 83754 83254 82755 82255 81756 81256 80757 80257 79758 79258 78759 78259 77759 77260 76760 76261 75761 75262 74762 74262 73763 73263 72764 72264
+sink: arm-track-um 256 71764 71265 70765 70266 69766 69266 68767 68267 67768 67268 66768 66269 65769 65269 64770 64270 63770 63271 62772 62272 61772 61273 60773 60273 59774 59274 58774 58274 57775 57275 56775 56276 55776 55276 54776 54277 53777 53279 52785 52297 51814 51336 50862 50394 49930 49472 49019 48570 48127 47689 47255 46827 46403 45985 45572 45163 44760 44361 43968 43580 43196 42818 42444 42076
+sink: arm-track-um 320 41712 41354 41001 40652 40309 39970 39637 39308 38985 38666 38353 38044 37741 37442 37149 36860 36577 36298 36025 35756 35493 35234 34981 34732 34489 34250 34017 33788 33565 33346 33133 32924 32721 32522 32329 32140 31957 31778 31605 31436 31273 31114 30960 30812 30668 30530 30396 30268 30144 30026 29912 29804 29700 29601 29508 29419 29336 29257 29184 29115 29052 28993 28939 28891
+sink: arm-track-um 384 28847 28809 28775 28747 28723 28704 28691 28682 28679
+late-check: FAIL late URGENT 89 NOT inside a guest stall or a fault of this check (on its way 43377780 ms to 43377812 ms, total 31197008 ns)
+late-check: FAIL late URGENT 164 NOT inside a guest stall or a fault of this check (on its way 43377839 ms to 43377873 ms, total 33762000 ns)
+late-check: FAIL late URGENT 239 NOT inside a guest stall or a fault of this check (on its way 43377900 ms to 43377934 ms, total 33480992 ns)
+late-check: FAIL late URGENT 314 NOT inside a guest stall or a fault of this check (on its way 43377960 ms to 43377995 ms, total 34371008 ns)
+late-check: FAIL late URGENT 389 NOT inside a guest stall or a fault of this check (on its way 43378020 ms to 43378055 ms, total 34608992 ns)
+late-check: FAIL late URGENT 465 NOT inside a guest stall or a fault of this check (on its way 43378078 ms to 43378114 ms, total 35197008 ns)
+late-check: FAIL late URGENT 540 NOT inside a guest stall or a fault of this check (on its way 43378139 ms to 43378173 ms, total 33588000 ns)
+late-check: FAIL late URGENT 915 NOT inside a guest stall or a fault of this check (on its way 43378439 ms to 43378474 ms, total 34392992 ns)
+late-check: FAIL late URGENT 1517 NOT inside a guest stall or a fault of this check (on its way 43378899 ms to 43378931 ms, total 31226000 ns)
+late-check: FAIL late URGENT 1592 NOT inside a guest stall or a fault of this check (on its way 43378961 ms to 43378993 ms, total 31476000 ns)
+late-check: FAIL late URGENT 1667 NOT inside a guest stall or a fault of this check (on its way 43379020 ms to 43379054 ms, total 33780000 ns)
+late-check: FAIL late URGENT 1743 NOT inside a guest stall or a fault of this check (on its way 43379081 ms to 43379114 ms, total 32487008 ns)
+late-check: FAIL late URGENT 1967 NOT inside a guest stall or a fault of this check (on its way 43379239 ms to 43379274 ms, total 34055008 ns)
+late-check: late URGENT 2042 inside a guest stall of 6 ms at 43379335 ms (on its way 43379300 ms to 43379367 ms; 35.1 ms over the deadline, 15.8 ms of stalls on its way, at most 35.7 ms)
+late-check: late URGENT 2043 inside a guest stall of 6 ms at 43379335 ms (on its way 43379320 ms to 43379375 ms; 23.6 ms over the deadline, 15.8 ms of stalls on its way, at most 35.7 ms)
+late-check: FAIL late URGENT 2118 NOT inside a guest stall or a fault of this check (on its way 43379375 ms to 43379412 ms, total 36360000 ns)
+late-check: FAIL late URGENT 2119 NOT inside a guest stall or a fault of this check (on its way 43379380 ms to 43379413 ms, total 32819008 ns)
+late-check: FAIL late URGENT 2719 NOT inside a guest stall or a fault of this check (on its way 43379821 ms to 43379857 ms, total 35278000 ns)
+late-check: FAIL late URGENT 2794 NOT inside a guest stall or a fault of this check (on its way 43379882 ms to 43379916 ms, total 33134992 ns)
+late-check: FAIL late URGENT 2869 NOT inside a guest stall or a fault of this check (on its way 43379942 ms to 43379974 ms, total 31507008 ns)
+late-check: FAIL late URGENT 2946 NOT inside a guest stall or a fault of this check (on its way 43380003 ms to 43380039 ms, total 35025008 ns)
+late-check: stall probe from 43377425 ms, stalls over 5 ms 2, worst 9734000 ns
+late-check: late URGENT 21: inside guest stalls 2, inside faults 0, outside 19
+late-check: late COMMAND 0: inside guest stalls 0, inside faults 0, outside 0
+late-check: late inside guest stalls whose stall time seen covers the lateness 0 of 2 (the rest are covered only with the probe period)
+late-check: late URGENT or COMMAND inside guest stalls 2, inside faults 0, outside 19
