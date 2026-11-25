@@ -5,6 +5,10 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 ssh=(ssh -p 2222 -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes)
+# Each scenario on the guest is killed after this many seconds; a dead
+# guest stops the whole run with exit 3 (scripts/watchdog.sh, D-077).
+limit=${SCENARIO_LIMIT_S:-300}
+watch=(bash "$root/scripts/watchdog.sh" "$limit")
 scp=(scp -P 2222 -i "$HOME/.ssh/id_ed25519" -o BatchMode=yes)
 # Each run keeps its own logs: build/scenarios/runs/<time>-<pid>/, and
 # build/scenarios/latest points at the newest one. Nothing is erased.
@@ -28,11 +32,21 @@ run_guest() {
     shift
     echo "=== $label ==="
     set +e
-    "${ssh[@]}" root@localhost "$guest_setup; $*" > "$out/$label.log"
+    "${watch[@]}" "$label" "$out" "${ssh[@]}" root@localhost "$guest_setup; $*" > "$out/$label.log"
     status=$?
     set -e
     echo "scenario-host: guest exit $status" >> "$out/$label.log"
     echo "$label guest exit $status"
+    stop_if_guest_dead "$status"
+}
+
+# watchdog.sh exits 3 after a run past the limit when the guest does not
+# answer; then every later scenario would only wait for its own limit.
+stop_if_guest_dead() {
+    if [ "$1" -eq 3 ] && [ -f "$out/$label-serial.log" ]; then
+        echo "scenarios: the guest does not answer after $label; serial log in build/scenarios/runs/$stamp/$label-serial.log; the later scenarios are not run"
+        exit 3
+    fi
 }
 
 run_guest s1 "/tmp/qnx-s4.sh 5"
@@ -44,7 +58,7 @@ echo "=== s4 ==="
     --log="$out/panel-s4.log" >/dev/null 2>&1 &
 panel_pid=$!
 set +e
-"${ssh[@]}" root@localhost "$guest_setup; /tmp/qnx-s4.sh 5" > "$out/s4.log" &
+"${watch[@]}" s4 "$out" "${ssh[@]}" root@localhost "$guest_setup; /tmp/qnx-s4.sh 5" > "$out/s4.log" &
 ssh_pid=$!
 set -e
 i=0
@@ -75,6 +89,8 @@ set -e
 echo "scenario-host: guest exit $s4_status" >> "$out/s4.log"
 cat "$out/s4-marks.txt" >> "$out/s4.log"
 echo "s4 guest exit $s4_status"
+label=s4
+stop_if_guest_dead "$s4_status"
 
 set +e
 /usr/bin/ruby "$root/scripts/scenario_report.rb" \

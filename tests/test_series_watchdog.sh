@@ -63,6 +63,20 @@ check "says the guest does not answer" "$(echo "$out" | grep -c 'guest does not 
 dir=$(echo "$out" | awk '/series: logs in/ { print $NF }')
 check "serial log kept next to the run" "$(cat "$root/$dir/01-serial.log" 2>/dev/null)" "serial log line"
 
+# 4. scripts/watchdog.sh alone (used by make measure and run-scenarios.sh).
+wd="$root/scripts/watchdog.sh"
+bash "$wd" 5 ok "$work" true; check "watchdog passes exit 0 through" "$?" 0
+bash "$wd" 5 bad "$work" sh -c 'exit 7'; check "watchdog passes exit 7 through" "$?" 7
+out=$(bash "$wd" 5 echo "$work" echo hello 2>/dev/null)
+check "watchdog keeps the command output" "$out" hello
+out=$(WATCHDOG_GUEST_CHECK=true WATCHDOG_GUEST_CLEAN=true bash "$wd" 2 m1 "$work" sleep 60 2>&1)
+check "timeout with a live guest is 124" "$?" 124
+check "timeout line names the label" "$(echo "$out" | grep -c 'm1 TIMEOUT after 2 s')" 1
+WATCHDOG_GUEST_CHECK=false WATCHDOG_SERIAL="$work/serial.log" bash "$wd" 2 m2 "$work/logs" sleep 60 2>/dev/null
+check "timeout with a dead guest is 3" "$?" 3
+check "serial log kept as LABEL-serial.log" "$(cat "$work/logs/m2-serial.log" 2>/dev/null)" "serial log line"
+check "bad limit is a usage error" "$(bash "$wd" x l "$work" true 2>/dev/null; echo $?)" 2
+
 if [ "$failures" -ne 0 ]; then
     echo "$failures test(s) failed"
     exit 1

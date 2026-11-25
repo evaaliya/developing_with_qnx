@@ -11,9 +11,9 @@
 # ssh. If it answers, the network nodes on it are stopped and the series
 # goes on; if not, the QEMU serial log is copied next to the run and the
 # series stops with exit 3 (a guest kernel stop, F-032, hung a series for
-# 33 minutes). SERIES_MAKE, SERIES_GUEST_CHECK, SERIES_GUEST_CLEAN and
-# SERIES_SERIAL replace make, the ssh check, the ssh clean-up and the
-# serial log path (tests/test_series_watchdog.sh).
+# 33 minutes). The limit is scripts/watchdog.sh. SERIES_MAKE replaces
+# make; SERIES_GUEST_CHECK, SERIES_GUEST_CLEAN and SERIES_SERIAL are
+# passed to it as WATCHDOG_* (tests/test_series_watchdog.sh).
 set -u
 
 if [ "$#" -lt 2 ]; then
@@ -47,11 +47,10 @@ case "$limit" in
         exit 2
         ;;
 esac
-ssh_guest="ssh -p 2222 -i $HOME/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@localhost"
 make_cmd=${SERIES_MAKE:-make}
-guest_check=${SERIES_GUEST_CHECK:-"$ssh_guest uname -r"}
-guest_clean=${SERIES_GUEST_CLEAN:-"$ssh_guest 'for p in supervisor telemetry source relay sink stall-probe hold-next; do slay -Q -f \$p >/dev/null 2>&1; done; true'"}
-serial=${SERIES_SERIAL:-$HOME/qnxprojects/targets/qemu-qnx800-aarch64le/output/serial.log}
+[ -n "${SERIES_GUEST_CHECK:-}" ] && export WATCHDOG_GUEST_CHECK="$SERIES_GUEST_CHECK"
+[ -n "${SERIES_GUEST_CLEAN:-}" ] && export WATCHDOG_GUEST_CLEAN="$SERIES_GUEST_CLEAN"
+[ -n "${SERIES_SERIAL:-}" ] && export WATCHDOG_SERIAL="$SERIES_SERIAL"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 dir="$root/build/series/$target-$(date +%Y%m%d-%H%M%S)-$$"
@@ -60,15 +59,6 @@ summary="$dir/summary.txt"
 echo "series: $n x make $target $*" | tee "$summary"
 echo "series: logs in ${dir#"$root"/}" | tee -a "$summary"
 echo "series: each run is stopped after $limit s" | tee -a "$summary"
-
-# Kill a process and everything it started.
-kill_tree() {
-    local child
-    for child in $(pgrep -P "$1" 2>/dev/null); do
-        kill_tree "$child"
-    done
-    kill -9 "$1" 2>/dev/null || true
-}
 
 # Files that checks write to fixed paths, copied after each run.
 keep_fixed() {
@@ -90,36 +80,18 @@ while [ "$i" -le "$n" ]; do
     tag=$(printf '%02d' "$i")
     log="$dir/$tag.log"
     start=$(date '+%H:%M:%S')
-    (cd "$root" && exec $make_cmd "$target" "$@") > "$log" 2>&1 &
-    run_pid=$!
-    began=$(date +%s)
-    timed_out=0
-    while kill -0 "$run_pid" 2>/dev/null; do
-        if [ $(( $(date +%s) - began )) -ge "$limit" ]; then
-            timed_out=1
-            kill_tree "$run_pid"
-            break
-        fi
-        sleep 1
-    done
-    wait "$run_pid" 2>/dev/null
+    (cd "$root" && bash "$root/scripts/watchdog.sh" "$limit" "$tag" "$dir" \
+        $make_cmd "$target" "$@") > "$log" 2>&1
     status=$?
     end=$(date '+%H:%M:%S')
-    if [ "$timed_out" -eq 1 ]; then
-        status=124
+    if [ "$status" -eq 124 ]; then
+        echo "series: run $tag TIMEOUT after $limit s; killed; the guest answers, the nodes on it are stopped, the series goes on" | tee -a "$summary"
+    elif [ "$status" -eq 3 ] && grep -q '^watchdog: the guest does not answer' "$log"; then
         echo "series: run $tag TIMEOUT after $limit s; killed" | tee -a "$summary"
-        if eval "$guest_check" > /dev/null 2>&1; then
-            echo "series: the guest answers; stopping the nodes on it and going on" | tee -a "$summary"
-            eval "$guest_clean" > /dev/null 2>&1 || true
-        else
-            if [ -f "$serial" ]; then
-                cp "$serial" "$dir/$tag-serial.log"
-            fi
-            echo "series: run $tag $start-$end exit $status" | tee -a "$summary"
-            echo "series: the guest does not answer; serial log kept in ${dir#"$root"/}/$tag-serial.log; the series stops" | tee -a "$summary"
-            echo "series: $target failed $((failed + 1)) of $i tried, $n planned" | tee -a "$summary"
-            exit 3
-        fi
+        echo "series: run $tag $start-$end exit $status" | tee -a "$summary"
+        echo "series: the guest does not answer; serial log kept in ${dir#"$root"/}/$tag-serial.log; the series stops" | tee -a "$summary"
+        echo "series: $target failed $((failed + 1)) of $i tried, $n planned" | tee -a "$summary"
+        exit 3
     fi
     case "$target" in
         run-live-restart | panel-check)
