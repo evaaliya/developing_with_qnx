@@ -2562,4 +2562,5 @@ SHA-256 of the originals (the copies hash the same):
 700301c8b4f6a4e4c706d2e720a85d9a91beadd85eca745edc2f3405ab804ed1  naive-flood-75.log         -> replay/b29/naive-flood-75.txt
 94b6fcfc9ece80b6cc9d9a70d0033b2ebb27401e61ea4ce7e92d466bf9405e21  replay/ours-flood-11.json  -> replay/b29/ours-flood-11.json
 e912d9471ba2ff1bc559954fc55808d9990c2f8c6829879a0688a8433a3034cc  replay/naive-flood-75.json -> replay/b29/naive-flood-75.json
+797f88e19790a355d40ca3bf4c0a69b6c4cd775b2ee083537fb50c2bfa9814a9  report.txt                 -> replay/b29/series-report.txt
 ```
