@@ -2550,3 +2550,16 @@ Guest after all runs:
 ```text
 QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
 ```
+
+## 2026-11-27 · replay of two B29 runs
+
+The replay video uses two real runs from the B29 series `build/arm/runs/20261125-215226/` (`make run-arm-precise`, 2026-11-25 21:52, one guest boot). `build/` is not tracked, so both runs were copied byte for byte into `replay/b29/`. Logs are stored as `.txt` because the commit hook blocks `*.log`. Neither file contains secrets or local host paths (grep for `/Users/`, user name, `password`, `token`, `PRIVATE`, `ssh-`, `@`: 0 matches).
+
+SHA-256 of the originals (the copies hash the same):
+
+```text
+022f4859296da7266c848d4a61a69310b026d5b40a4490340cffb89cf54f2f1e  ours-flood-11.log          -> replay/b29/ours-flood-11.txt
+700301c8b4f6a4e4c706d2e720a85d9a91beadd85eca745edc2f3405ab804ed1  naive-flood-75.log         -> replay/b29/naive-flood-75.txt
+94b6fcfc9ece80b6cc9d9a70d0033b2ebb27401e61ea4ce7e92d466bf9405e21  replay/ours-flood-11.json  -> replay/b29/ours-flood-11.json
+e912d9471ba2ff1bc559954fc55808d9990c2f8c6829879a0688a8433a3034cc  replay/naive-flood-75.json -> replay/b29/naive-flood-75.json
+```
