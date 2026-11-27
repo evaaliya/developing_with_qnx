@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare run-arm-precise replay-venv replay-rrd replay-view
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare run-arm-precise replay-venv replay-rrd replay-view qnx-tools upload-qnx-tools run-qnx-tools
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -59,6 +59,12 @@ naive:
 	mkdir -p build/naive
 	docker exec qnx-build "$(PROJECT_DIR)/build.sh" naive
 
+# The "QNX tools" network (D-098): its own programs from src/qnx-tools/
+# into build/qnx-tools/ (source, relay, sink, launch).
+qnx-tools:
+	mkdir -p build/qnx-tools
+	docker exec qnx-build "$(PROJECT_DIR)/build.sh" qnx-tools
+
 test: build/latency-report
 	mkdir -p build
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-deadline \
@@ -101,6 +107,9 @@ test: build/latency-report
 		scripts/arm-replay-pose.c src/common/arm_model.c -lm
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-sched-ours \
 		tests/test_naive_sched.c
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -I src/qnx-tools \
+		-o build/test-qnx-tools tests/test_qnx_tools.c src/qnx-tools/qt_core.c \
+		src/common/signal_msg.c src/common/arm_plan.c src/common/arm_model.c -lm
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -DSIGNAL_NAIVE=1 \
 		-o build/test-sched-naive tests/test_naive_sched.c
 	./build/test-deadline
@@ -120,6 +129,10 @@ test: build/latency-report
 	./build/test-arm
 	./build/test-sched-ours
 	./build/test-sched-naive
+	./build/test-qnx-tools replay/b29/ours-flood-11.txt build/qt-sink-lines.txt
+	./build/latency-report build/qt-sink-lines.txt > build/qt-sink-lines.report
+	grep -q '^latency unparsed 0$$' build/qt-sink-lines.report
+	grep -q '^latency class URGENT n 2$$' build/qt-sink-lines.report
 	sh tests/test_late_check.sh
 	bash tests/test_series_watchdog.sh
 	bash tests/test_arm_compare.sh
@@ -140,6 +153,8 @@ test: build/latency-report
 		tests/fixtures/order-clean.txt tests/fixtures/order-edge.txt \
 		tests/fixtures/order-ahead.txt > build/order-stalls.out
 	diff -u tests/fixtures/order-stalls.expected build/order-stalls.out
+	# The QNX tools network builds in the container with -Werror (D-098).
+	docker exec qnx-build "$(PROJECT_DIR)/build.sh" qnx-tools
 
 clean:
 	rm -rf build
@@ -342,6 +357,24 @@ upload-naive: naive
 	$(SSH) root@localhost "slay -Q -f source >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; mkdir -p /tmp/naive"
 	$(SCP) ./build/naive/source ./build/naive/sink ./build/naive/relay root@localhost:/tmp/naive/
 	$(SSH) root@localhost "chmod +x /tmp/naive/source /tmp/naive/sink /tmp/naive/relay"
+
+# HAM is not in the guest image: ham, hamctrl and libham.so.2 come from
+# the SDP package (F-037) into /tmp/qnx-tools/ham/ once; launch starts HAM
+# from there with LD_LIBRARY_PATH pointing at it.
+QT_SDP_LIB := $(HOME)/qnx800/target/qnx/aarch64le
+upload-qnx-tools: qnx-tools
+	$(SSH) root@localhost "LD_LIBRARY_PATH=/tmp/qnx-tools/ham /tmp/qnx-tools/launch stop >/dev/null 2>&1 || true; slay -Q -f source >/dev/null 2>&1 || true; slay -Q -f relay >/dev/null 2>&1 || true; slay -Q -f sink >/dev/null 2>&1 || true; mkdir -p /tmp/qnx-tools/ham"
+	$(SCP) ./build/qnx-tools/source ./build/qnx-tools/sink ./build/qnx-tools/relay ./build/qnx-tools/launch ./scripts/qnx-tools-run.sh root@localhost:/tmp/qnx-tools/
+	$(SSH) root@localhost "test -x /tmp/qnx-tools/ham/ham && test -x /tmp/qnx-tools/ham/hamctrl && test -f /tmp/qnx-tools/ham/libham.so.2" || \
+		$(SCP) $(QT_SDP_LIB)/usr/sbin/ham $(QT_SDP_LIB)/usr/sbin/hamctrl $(QT_SDP_LIB)/usr/lib/libham.so.2 root@localhost:/tmp/qnx-tools/ham/
+	$(SCP) ./scripts/qnx-arm-stop.sh ./scripts/qnx-late-check.sh root@localhost:/tmp/
+	$(SSH) root@localhost "chmod +x /tmp/qnx-tools/source /tmp/qnx-tools/sink /tmp/qnx-tools/relay /tmp/qnx-tools/launch /tmp/qnx-tools/qnx-tools-run.sh /tmp/qnx-tools/ham/ham /tmp/qnx-tools/ham/hamctrl /tmp/qnx-arm-stop.sh /tmp/qnx-late-check.sh; ls -l /tmp/qnx-tools /tmp/qnx-tools/ham; df -k /tmp"
+
+# A short run of the QNX tools network, started by HAM (QT_MODE=calm), or
+# with relay A killed three times to see HAM restart it (QT_MODE=kill).
+QT_MODE ?= calm
+run-qnx-tools: upload-qnx-tools
+	$(SSH) root@localhost 'LD_LIBRARY_PATH=/tmp/qnx-tools/ham /tmp/qnx-tools/qnx-tools-run.sh $(QT_MODE)'
 
 # The arm stop on our network and on the naive one in one guest boot, in
 # alternating blocks of ARM_BLOCK runs (D-086): ARM_N calm and ARM_N
