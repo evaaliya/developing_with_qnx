@@ -13,6 +13,14 @@ The arm pose comes from the sink's own model (scripts/replay_model.py);
 the replay fails if the model differs from the journal by more than
 0.01 mm in any frame. Playback speed 0.02 (D-095) is set in the
 blueprint stored in the file.
+B33: one take on the close-up tab. A second timeline "video" holds
+screen time: the approach at 1/APPROACH_SLOWDOWN, from SLOW_FROM_NS on
+at 1/EVENT_SLOWDOWN (0.02, D-095); it plays at speed 1 and starts by
+itself. Every frame is logged on both timelines, so a "video" instant
+always shows a journal frame with its own real time. A Pinhole camera
+on "video" goes from a view of the whole arm to the B32 close-up; the
+close-up views track it. The arm is drawn as a manipulator (base, thick
+links, joint housings); its pose is the same model output as before.
 """
 
 import argparse
@@ -39,6 +47,25 @@ LAST_FRAME_NS = 203_858_899
 # The naive run's last frame: the 2 ms frame where the journal has the
 # touch (touch_ns +194.304 ms lies inside it). Checked in main().
 NAIVE_TOUCH_FRAME_NS = 195_858_899
+# The first journal frame of both runs: the start of the approach.
+FIRST_FRAME_NS = -668_141_101
+
+# B33, the "video" timeline (screen time). Integer slowdowns, so every
+# video time is an exact number of ns. The event part keeps D-095.
+VIDEO_TIMELINE = "video"
+APPROACH_SLOWDOWN = 10
+EVENT_SLOWDOWN = 50
+assert abs(PLAYBACK_SPEED * EVENT_SLOWDOWN - 1.0) < 1e-12
+SLOW_FROM_NS = -20_000_000
+# After the last frame the picture stays this long before the loop restarts.
+VIDEO_TAIL_NS = 1_500_000_000
+# The camera: the whole arm until CAM_DOLLY_FROM_S, the dolly to the B32
+# close-up until CAM_DOLLY_TO_S, then the close-up (screen seconds).
+CAM_DOLLY_FROM_S = 2.0
+CAM_DOLLY_TO_S = 6.0
+CAM_STEP_S = 1.0 / 60.0
+# Room around the whole arm in the first shot.
+OVERVIEW_MARGIN = 1.15
 
 EYE_RADIUS_MM = 12.0
 # Eye drawing (B32): angles from the axis of the eye that faces the arm.
@@ -71,6 +98,17 @@ CLOSEUP_TOOL_SCREEN_DEG = 45.0
 CLOSEUP_TARGET_MM = (5.0, 2.5)
 ARM_COLOR = [176, 184, 196]
 JOINT_COLOR = [90, 98, 112]
+# B33: the manipulator's look (drawing only; lengths and poses are D-079).
+LINK_RADII_MM = (26.0, 20.0)
+# Joint housings: drums across the arm plane, on the joint axes.
+HOUSING_RADII_MM = (42.0, 34.0, 24.0)
+HOUSING_LENGTHS_MM = (96.0, 80.0, 58.0)
+# The instrument holder: a sleeve on the last link from its joint; the
+# rest of the last link is the B32 tool, tip unchanged.
+HOLDER_RADIUS_MM = 7.0
+HOLDER_LENGTH_MM = 40.0
+HOUSING_COLOR = [70, 78, 92]
+LINK_COLOR = [214, 219, 226]
 NET_COLOR = {"naive": [230, 90, 70], "ours": [70, 190, 120]}
 PLAN_COLOR = [240, 200, 60]
 
@@ -84,8 +122,27 @@ def mm(xy):
     return [xy[0] * 1000.0, xy[1] * 1000.0, 0.0]
 
 
+def video_ns(t_ns):
+    """Screen time of real time t_ns (ns after person in), ns from the
+    start of the take: the approach at 1/APPROACH_SLOWDOWN, from
+    SLOW_FROM_NS on at 1/EVENT_SLOWDOWN. Exact integers."""
+    t = int(t_ns)
+    if t < FIRST_FRAME_NS:
+        raise ValueError("%d ns is before the first frame" % t)
+    if t <= SLOW_FROM_NS:
+        return (t - FIRST_FRAME_NS) * APPROACH_SLOWDOWN
+    return ((SLOW_FROM_NS - FIRST_FRAME_NS) * APPROACH_SLOWDOWN
+            + (t - SLOW_FROM_NS) * EVENT_SLOWDOWN)
+
+
+def video_end_ns():
+    return video_ns(LAST_FRAME_NS) + VIDEO_TAIL_NS
+
+
 def at(ns):
+    """Both timelines: real time from the journal and its screen time."""
     rr.set_time(TIMELINE, duration=np.timedelta64(int(ns), "ns"))
+    rr.set_time(VIDEO_TIMELINE, duration=np.timedelta64(video_ns(ns), "ns"))
 
 
 def caption(net, run, s, totals):
@@ -184,6 +241,13 @@ def tool_mesh(length_mm, segments=40):
                      vertex_colors=[TOOL_COLOR] * len(pos), triangle_indices=tri)
 
 
+def z_to(v):
+    """Rotation that turns +z onto the direction v (in the arm plane)."""
+    d = unit(v)
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, d[2]))))
+    return rr.RotationAxisAngle(axis=[-d[1], d[0], 0.0], degrees=angle)
+
+
 def tool_transform(joint, tip):
     """Puts the tool's +z on the link from the tip to the joint."""
     d = unit(np.array(joint) - np.array(tip))
@@ -208,9 +272,11 @@ def log_scene(net, run, pose, marks, s):
     # point; explained in the caption, no label over the place of contact.
     rr.log(root + "/plan", rr.LineStrips3D(
         [ring], radii=[0.12], colors=[PLAN_COLOR]), static=True)
+    # The base: a pedestal under the first joint (drawing only, B33).
     rr.log(root + "/base", rr.Boxes3D(
-        centers=[[0.0, -20.0, 0.0]], half_sizes=[[45.0, 20.0, 45.0]],
-        colors=[JOINT_COLOR], fill_mode="solid"), static=True)
+        centers=[[0.0, -HOUSING_RADII_MM[0] - 40.0, 0.0]],
+        half_sizes=[[70.0, 40.0, 70.0]],
+        colors=[HOUSING_COLOR], fill_mode="solid"), static=True)
 
     j2, tip_home = mm(pose["frames"][0]["joints"][1]), mm(pose["frames"][0]["joints"][2])
     rr.log(root + "/arm/tool", tool_mesh(float(np.linalg.norm(
@@ -221,10 +287,26 @@ def log_scene(net, run, pose, marks, s):
         at(f["t_ns"])
         pts = [[0.0, 0.0, 0.0]] + [mm(j) for j in f["joints"]]
         trail.append(pts[-1])
-        rr.log(root + "/arm/links", rr.LineStrips3D(
-            [pts[0:2], pts[1:3]], radii=[9.0, 7.0], colors=[ARM_COLOR] * 2))
-        rr.log(root + "/arm/joints", rr.Points3D(
-            pts[0:3], radii=[12.0, 10.0, 8.0], colors=[JOINT_COLOR] * 3))
+        # B33: the same joint points as before, drawn as a manipulator:
+        # thick links between the joints, a housing on each joint axis
+        # (across the arm plane), a holder on the start of the last link.
+        rr.log(root + "/arm/links", rr.Capsules3D(
+            translations=pts[0:2],
+            lengths=[float(np.linalg.norm(np.subtract(pts[k + 1], pts[k])))
+                     for k in range(2)],
+            radii=list(LINK_RADII_MM),
+            rotation_axis_angles=[z_to(np.subtract(pts[k + 1], pts[k])) for k in range(2)],
+            colors=[LINK_COLOR] * 2, fill_mode="solid"))
+        rr.log(root + "/arm/joints", rr.Cylinders3D(
+            centers=pts[0:3], radii=list(HOUSING_RADII_MM),
+            lengths=list(HOUSING_LENGTHS_MM),
+            colors=[HOUSING_COLOR] * 3, fill_mode="solid"))
+        d3 = unit(np.subtract(pts[3], pts[2]))
+        rr.log(root + "/arm/holder", rr.Cylinders3D(
+            centers=[(np.array(pts[2]) + d3 * HOLDER_LENGTH_MM / 2.0).tolist()],
+            radii=[HOLDER_RADIUS_MM], lengths=[HOLDER_LENGTH_MM],
+            rotation_axis_angles=[z_to(d3)],
+            colors=[LINK_COLOR], fill_mode="solid"))
         rr.log(root + "/arm/tool", tool_transform(pts[2], pts[3]))
         rr.log(root + "/arm/tip", rr.Points3D(
             [pts[3]], radii=[0.15], colors=[NET_COLOR[net]]))
@@ -267,11 +349,18 @@ def log_clock_and_plan(frames, plan_mm):
     for f in frames:
         at(f["t_ns"])
         rr.log("chart/plan", rr.Scalars(plan_mm))
-        rr.log("clock", rr.TextDocument(
-            "# %+.3f ms\nsince **person in** · 2 ms frames · "
-            "playback %.2f× (%d× slower)"
-            % (f["t_ns"] / 1e6, PLAYBACK_SPEED, round(1 / PLAYBACK_SPEED)),
-            media_type=rr.MediaType.MARKDOWN))
+        rr.log("clock", rr.TextDocument(clock_text(f["t_ns"]),
+                                        media_type=rr.MediaType.MARKDOWN))
+
+
+def clock_text(t_ns):
+    """The counter: real time from the journal; the screen speed after it."""
+    if t_ns > SLOW_FROM_NS:
+        speed = "**slow motion ×%d** (playback %.2f×)" % (EVENT_SLOWDOWN, 1.0 / EVENT_SLOWDOWN)
+    else:
+        speed = "approach ×%d slower" % APPROACH_SLOWDOWN
+    return "# %+.3f ms\nsince **person in** · real time from the journal · 2 ms frames · %s" % (
+        t_ns / 1e6, speed)
 
 
 def camera(eye_mm, home_tip_mm):
@@ -293,11 +382,12 @@ def closeup_distance_mm():
     return half_h / math.tan(math.radians(FOV_Y_DEG) / 2.0)
 
 
-def closeup_camera(eye_mm, toward, tool_dir):
+def closeup_frame(eye_mm, toward, tool_dir):
     """One camera for both close-ups (B32): from the side of the eye, so
     the gap between the tip and the eye is seen against the background,
     tilted CLOSEUP_TILT_DEG towards the arm so the iris shows; the tool
-    enters from the upper right at CLOSEUP_TOOL_SCREEN_DEG."""
+    enters from the upper right at CLOSEUP_TOOL_SCREEN_DEG. Returns the
+    screen axes (right, up, back), the target and the position."""
     u = unit(toward)
     z = np.array([0.0, 0.0, 1.0])
     t = math.radians(CLOSEUP_TILT_DEG)
@@ -312,20 +402,86 @@ def closeup_camera(eye_mm, toward, tool_dir):
     right = np.cross(up, back)
     e = np.array(eye_mm)
     target = e + CLOSEUP_TARGET_MM[0] * right + CLOSEUP_TARGET_MM[1] * up
-    position = target + back * closeup_distance_mm()
-    return rrb.EyeControls3D(
-        kind=rrb.Eye3DKind.Orbital, position=position.tolist(),
-        look_target=target.tolist(), eye_up=up.tolist())
+    d = closeup_distance_mm()
+    return {"right": right, "up": up, "back": back, "target": target,
+            "distance": d, "position": target + back * d}
+
+
+def overview_frame(close, points_mm):
+    """B33, the first shot: the close-up's own direction, pulled back so
+    every point (base, joints of all frames, eye) fits with a margin."""
+    p = np.array(points_mm, dtype=float)
+    r = p @ close["right"]
+    u = p @ close["up"]
+    centre_r, centre_u = (r.min() + r.max()) / 2.0, (u.min() + u.max()) / 2.0
+    # The target on the plane through the eye target, across the screen.
+    depth = np.dot(close["target"], close["back"])
+    target = (centre_r * close["right"] + centre_u * close["up"]
+              + depth * close["back"])
+    half_h = max((u.max() - u.min()) / 2.0,
+                 (r.max() - r.min()) / 2.0 / CLOSEUP_ASPECT) * OVERVIEW_MARGIN
+    d = half_h / math.tan(math.radians(FOV_Y_DEG) / 2.0)
+    # Far enough that nothing (nearest point) is behind the camera.
+    d += max(0.0, float((p @ close["back"]).max() - depth))
+    return {"target": target, "distance": d}
+
+
+def camera_at(s_video, over, close):
+    """Camera target and distance at screen time s_video (s): the whole
+    arm, then a dolly (smooth start and stop) to the close-up. Distance
+    falls geometrically, so the zoom speed looks even; the target moves
+    in step with how much of the distance is covered."""
+    if s_video <= CAM_DOLLY_FROM_S:
+        k = 0.0
+    elif s_video >= CAM_DOLLY_TO_S:
+        k = 1.0
+    else:
+        x = (s_video - CAM_DOLLY_FROM_S) / (CAM_DOLLY_TO_S - CAM_DOLLY_FROM_S)
+        k = x * x * (3.0 - 2.0 * x)
+    d0, d1 = over["distance"], close["distance"]
+    d = d0 * (d1 / d0) ** k
+    w = (d0 - d) / (d0 - d1)
+    target = over["target"] + (close["target"] - over["target"]) * w
+    return target, d
+
+
+def log_camera(over, close):
+    """A Pinhole camera on the "video" timeline only (it is staging, not
+    journal data), for both scenes; the close-up views track it. The
+    field of view is Rerun's 55 degrees, so the end is the B32 frame."""
+    rot = np.column_stack([close["right"], close["up"], close["back"]])
+    end_s = video_end_ns() / 1e9
+    steps = int(math.ceil(CAM_DOLLY_TO_S / CAM_STEP_S))
+    times = [i * CAM_STEP_S for i in range(steps + 1)]
+    for net, _ in SIDES:
+        path = "%s/scene/camera" % net
+        rr.log(path, rr.Pinhole(
+            fov_y=math.radians(FOV_Y_DEG), aspect_ratio=CLOSEUP_ASPECT,
+            camera_xyz=rr.ViewCoordinates.RUB, image_plane_distance=0.001,
+            line_width=0.0), static=True)
+        for s in times:
+            rr.reset_time()
+            rr.set_time(VIDEO_TIMELINE, duration=np.timedelta64(int(round(s * 1e9)), "ns"))
+            target, d = camera_at(s, over, close)
+            rr.log(path, rr.Transform3D(
+                translation=(target + close["back"] * d).tolist(), mat3x3=rot))
+    rr.reset_time()
+    return end_s
 
 
 def blueprint(eye_mm, home_tip_mm, toward, tool_dir):
     eye = camera(eye_mm, home_tip_mm)
-    close = closeup_camera(eye_mm, toward, tool_dir)
+
+    def close(net):
+        # B33: the view takes the pose and the 55 degree field of view of
+        # the scene's Pinhole camera, frame by frame on "video".
+        return rrb.EyeControls3D(tracking_entity="/%s/scene/camera" % net)
 
     def side(net, title, cam, shares, caption_title=True):
         return rrb.Vertical(
             rrb.Spatial3DView(name=title, origin="/%s/scene" % net,
-                              eye_controls=cam, background=[14, 15, 19],
+                              eye_controls=cam(net) if callable(cam) else cam,
+                              background=[14, 15, 19],
                               line_grid=False),
             rrb.TextDocumentView(name="%s: caption" % net,
                                  origin="/%s/caption" % net,
@@ -362,10 +518,12 @@ def blueprint(eye_mm, home_tip_mm, toward, tool_dir):
         rrb.Tabs(closeup, overview, active_tab=0),
         rrb.TimePanel(
             state="collapsed",
-            timeline=TIMELINE, playback_speed=PLAYBACK_SPEED,
-            play_state="paused", loop_mode="selection",
+            # B33: screen time at speed 1 (the slowdowns are inside the
+            # timeline), playing from the start, the whole take in a loop.
+            timeline=VIDEO_TIMELINE, playback_speed=1.0,
+            play_state="playing", loop_mode="selection",
             time_selection=rrb.components.AbsoluteTimeRange(
-                min=LOOP_FROM_NS, max=LOOP_TO_NS)),
+                min=0, max=video_end_ns())),
         rrb.BlueprintPanel(state="collapsed"),
         rrb.SelectionPanel(state="collapsed"),
         collapse_panels=False,
@@ -397,6 +555,10 @@ def main(argv=None):
     if naive_last != NAIVE_TOUCH_FRAME_NS:
         raise rm.ReplayError("naive last frame at %d ns, NAIVE_TOUCH_FRAME_NS is %d"
                              % (naive_last, NAIVE_TOUCH_FRAME_NS))
+    for net, _, pose, _, _ in data:
+        if pose["frames"][0]["t_ns"] != FIRST_FRAME_NS:
+            raise rm.ReplayError("%s first frame at %d ns, FIRST_FRAME_NS is %d"
+                                 % (net, pose["frames"][0]["t_ns"], FIRST_FRAME_NS))
     eye = mm(data[0][2]["eye_point"])
     home_tip = mm(data[0][2]["frames"][0]["joints"][2])
     # Both runs share the eye and the approach up to the event: one camera.
@@ -411,6 +573,25 @@ def main(argv=None):
     # The viewer remembers a layout per application; the .rbl next to the
     # .rrd, opened with it, puts this layout back (scripts/replay_view.py).
     bp.save(APP_ID, os.path.splitext(a.out)[0] + ".rbl")
+    # B33: the first shot holds the whole arm in every frame, the base
+    # and the housings around the joints included.
+    close = closeup_frame(eye, toward, tool_dir)
+    pts = [eye]
+    for _, _, pose, _, _ in data:
+        for f in pose["frames"]:
+            for k, j in enumerate([(0.0, 0.0)] + list(f["joints"])):
+                c = mm(j)
+                r = HOUSING_RADII_MM[min(k, 2)]
+                pts += [[c[0] + dx, c[1] + dy, c[2] + dz]
+                        for dx in (-r, r) for dy in (-r, r) for dz in (-r, r)]
+    base_y = -HOUSING_RADII_MM[0] - 80.0
+    pts += [[x, base_y, z] for x in (-70.0, 70.0) for z in (-70.0, 70.0)]
+    over = overview_frame(close, pts)
+    log_camera(over, close)
+    print("camera: whole arm at %.0f mm, close-up at %.2f mm; take %.3f s on screen "
+          "(approach x%d slower, from %+.0f ms x%d slower)"
+          % (over["distance"], close["distance"], video_end_ns() / 1e9,
+             APPROACH_SLOWDOWN, SLOW_FROM_NS / 1e6, EVENT_SLOWDOWN))
     longest = max(data, key=lambda d: len(d[2]["frames"]))
     log_clock_and_plan(longest[2]["frames"], longest[4]["plan_point_mm"])
     for net, run, pose, marks, s in data:
