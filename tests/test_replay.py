@@ -127,5 +127,43 @@ class NumbersOfB29(unittest.TestCase):
         self.assertEqual(t[("ours", "calm")], (0, 34))
 
 
+class GapLabelIsTheJournal(unittest.TestCase):
+    """B32: the gap line's text in every frame is the journal's distance."""
+
+    def test_every_frame_label_is_the_journal_distance(self):
+        for name in ("ours-flood-11", "naive-flood-75"):
+            run, pose = load(name)
+            labels = rm.gap_labels(run, pose)
+            self.assertEqual(len(labels), len(run["samples"]), name)
+            for lab, f, (_, eye_mm) in zip(labels, pose["frames"], run["samples"]):
+                self.assertEqual(lab["t_ns"], f["t_ns"])
+                if lab["text"] == "contact":
+                    self.assertEqual(eye_mm, 0.0)
+                    continue
+                self.assertTrue(lab["text"].endswith(" mm"), lab["text"])
+                # The journal is in whole micrometres; the label in 0.01 mm
+                # differs from it by half a digit (5 um) at most.
+                shown_um = round(float(lab["text"][:-3]) * 1000)
+                self.assertLessEqual(abs(shown_um - round(eye_mm * 1000)), 5, (name, lab))
+
+    def test_ends_where_b29_says(self):
+        _, pose = load("ours-flood-11")
+        labels = rm.gap_labels(rm.load_run(RUNS, "ours-flood-11"), pose)
+        self.assertEqual(labels[-1]["text"], "6.91 mm")
+        self.assertNotIn("contact", [l["text"] for l in labels])
+        run, pose = load("naive-flood-75")
+        labels = rm.gap_labels(run, pose)
+        self.assertEqual(labels[-1]["text"], "contact")
+        self.assertEqual([l["text"] for l in labels].count("contact"), 1)
+        self.assertNotEqual(labels[-2]["eye_mm"], 0.0)
+
+    def test_zero_without_a_touch_fails(self):
+        run, pose = load("ours-flood-11")
+        bad = copy.deepcopy(run)
+        bad["samples"][200][1] = 0.0
+        with self.assertRaises(rm.ReplayError):
+            rm.gap_labels(bad, pose)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

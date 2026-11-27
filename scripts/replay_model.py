@@ -211,3 +211,27 @@ def summary(run):
         "stop_number": run["stop_signal"]["number"],
         "stop_fate": run["stop_signal"]["fate"],
     }
+
+
+def gap_labels(run, pose):
+    """B32: the text on the gap line in every frame, from the journal.
+
+    The number is the journal's tip-to-eye distance of that 2 ms frame
+    (D-085), printed to 0.01 mm, not measured from the drawing. "contact"
+    only in the frame where the journal ends with a touch (distance 0).
+    """
+    frames = pose["frames"]
+    if len(frames) != len(run["samples"]):
+        raise ReplayError("%s: %d frames, %d journal samples"
+                          % (run["name"], len(frames), len(run["samples"])))
+    out = []
+    for i, (f, (_, eye_mm)) in enumerate(zip(frames, run["samples"])):
+        if eye_mm == 0.0:
+            if run["track_end"] != "touch" or i != len(frames) - 1:
+                raise ReplayError("%s: distance 0 in frame %d, but the journal "
+                                  "ends with %r" % (run["name"], i, run["track_end"]))
+            text = "contact"
+        else:
+            text = "%.2f mm" % eye_mm
+        out.append({"t_ns": f["t_ns"], "eye_mm": eye_mm, "text": text})
+    return out
