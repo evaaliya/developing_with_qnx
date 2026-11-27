@@ -6,6 +6,9 @@
         opens the window at the last frame (both arms at their end: ours
         at rest, naive at the eye), saves a screenshot, closes the window.
 
+B32: the window opens on the "close-up" tab; the UI zoom is set to
+100 % + UI_ZOOM_STEPS x 10 % so the text is readable on a 1080p video.
+
 The blueprint (layout, camera, playback 0.02) is inside the .rrd; the
 time cursor is not part of a blueprint, so it is set here through the
 viewer's gRPC port. The viewer listens on 127.0.0.1 only.
@@ -24,6 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import replay_rrd  # noqa: E402
 
 PORT = 9876
+# B32: the whole interface (captions, clock, labels) larger for a 1080p
+# video: the viewer's own UI zoom, from 100 % in steps of 10 %.
+UI_ZOOM_STEPS = 3
 
 
 def connect(proc, limit_s=30.0):
@@ -63,6 +69,11 @@ def main(argv=None):
     client = connect(proc)
     # The recording loads asynchronously; give it a moment before seeking.
     time.sleep(2.0)
+    # The zoom is a viewer setting that outlives the window: start from
+    # 100 % every time, so every run looks the same.
+    client.run_command("ui.reset_ui_zoom")
+    for _ in range(UI_ZOOM_STEPS):
+        client.run_command("ui.zoom_in_ui")
     if a.at_ms is not None:
         at_ns = int(round(a.at_ms * 1e6))
     elif a.shot:

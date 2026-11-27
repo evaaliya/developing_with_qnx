@@ -413,10 +413,12 @@ build/replay/arm-replay-pose: scripts/arm-replay-pose.c src/common/arm_model.c s
 		scripts/arm-replay-pose.c src/common/arm_model.c -lm
 
 # Writes build/replay/b29.rrd from replay/b29/; fails if the model and a
-# journal differ by more than 0.01 mm in any frame.
+# journal differ by more than 0.01 mm in any frame. Then reads the file
+# back and checks the gap label of every frame against the journal (B32).
 replay-rrd: $(REPLAY_VENV)/bin/rerun build/replay/arm-replay-pose
 	$(REPLAY_VENV)/bin/python scripts/replay_rrd.py --runs replay/b29 \
 		--pose build/replay/arm-replay-pose --out $(REPLAY_RRD)
+	$(REPLAY_VENV)/bin/python tests/test_replay_rrd.py $(REPLAY_RRD)
 
 # Opens a Rerun window (127.0.0.1 only) with the replay and its blueprint,
 # paused at -100 ms; Space plays the loop at 0.02.
