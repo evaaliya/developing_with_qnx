@@ -2564,3 +2564,35 @@ SHA-256 of the originals (the copies hash the same):
 e912d9471ba2ff1bc559954fc55808d9990c2f8c6829879a0688a8433a3034cc  replay/naive-flood-75.json -> replay/b29/naive-flood-75.json
 797f88e19790a355d40ca3bf4c0a69b6c4cd775b2ee083537fb50c2bfa9814a9  report.txt                 -> replay/b29/series-report.txt
 ```
+
+### Replay in Rerun (B31, 2026-11-27 22:14 +06)
+
+`make replay-rrd` turns the two kept runs into `build/replay/b29.rrd` (Rerun 0.44.0, pinned). The arm pose in 3D comes from the sink's own model (`src/common/arm_model.c`, run again by `scripts/arm-replay-pose.c` at the brake instant from the log); every 2 ms frame must match the logged tip-to-eye distance within 0.01 mm. Output:
+
+```text
+naive-flood-75: 433 frames, model vs journal worst 0.001 mm (limit 0.01)
+ours-flood-11: 437 frames, model vs journal worst 0.001 mm (limit 0.01)
+  naive    +0.000 ms  person in (the sensor sees the tip at 32.75 mm)
+  naive    +2.986 ms  URGENT #2262 (stop signal) issued by source
+  naive   +35.194 ms  URGENT #2262 reaches the arm: late (past the 31 ms URGENT deadline)
+  naive   +35.194 ms  brake engaged, 35.194 ms after person in, tip 23.95 mm from the eye
+  naive  +194.304 ms  the tip touches the eye, 194.3 ms after person in
+  ours     +0.000 ms  person in (the sensor sees the tip at 32.75 mm)
+  ours     +2.903 ms  URGENT #2259 (stop signal) issued by source
+  ours     +3.360 ms  URGENT #2259 reaches the arm: delivered in time
+  ours     +3.360 ms  brake engaged, 3.360 ms after person in, tip 31.91 mm from the eye
+  ours   +203.859 ms  arm at rest 6.91 mm from the eye (first 2 ms frame at rest)
+wrote build/replay/b29.rrd
+```
+
+Screenshot of the window at +203.859 ms (both arms at their end): `evidence/replay-b29-stop.png` (SHA-256 `5b08f2aea86e0c9618b506351aa8dff25ba98f5c05cf3a92efc4458688340330`). `make test`: exit 0, 1459 PASS, 0 FAIL; `tests/test_replay.py` 9 tests OK.
+
+Guest check after the batch (host-only change, `git diff --stat main -- src/` empty), 22:15:53–22:16:28 +06:
+
+```text
+up.sh exit 0
+--- source (exit 0) ---
+--- sink (exit 0) ---
+make run exit 0
+QNX qnx-a64 8.0.0 2026/06/05-16:21:14EDT QEMU_virt aarch64le
+```
