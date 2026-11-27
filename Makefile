@@ -10,7 +10,7 @@ PROJECT_DIR := $(patsubst $(HOME)/%,/home/$(USER)/%,$(ROOT))
 SSH := ssh -p 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 SCP := scp -P 2222 -i ~/.ssh/id_ed25519 -o BatchMode=yes
 
-.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare run-arm-precise
+.PHONY: default all clean upload run test scenarios run-kill run-lock run-stop run-source run-flood run-dev run-telemetry run-long-flood run-long-live run-live-restart run-flood-hang run-hold-urgent panel-check measure stall-check run-arm-stop arm-telemetry-check naive upload-naive run-arm-compare run-arm-precise replay-venv replay-rrd replay-view
 
 build/latency-report: src/latency-report/latency_report.c \
 		src/common/latency_stats.c src/common/latency_stats.h
@@ -96,6 +96,9 @@ test: build/latency-report
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-arm \
 		tests/test_arm.c src/common/arm_model.c src/common/arm_drive.c \
 		src/common/arm_plan.c -lm
+	mkdir -p build/replay
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/replay/arm-replay-pose \
+		scripts/arm-replay-pose.c src/common/arm_model.c -lm
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -o build/test-sched-ours \
 		tests/test_naive_sched.c
 	cc -std=c11 -Wall -Wextra -Werror -I src/common -DSIGNAL_NAIVE=1 \
@@ -124,6 +127,7 @@ test: build/latency-report
 	/usr/bin/ruby tests/test_arm_report.rb
 	/usr/bin/ruby tests/test_arm_compare.rb
 	/usr/bin/ruby tests/test_arm_precise.rb
+	/usr/bin/python3 tests/test_replay.py
 	LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 /usr/bin/ruby tests/test_scenario_report.rb
 	./build/latency-report tests/fixtures/sink-latency-a.txt \
 		tests/fixtures/sink-latency-b.txt > build/sink-latency.out
@@ -383,3 +387,38 @@ run-arm-precise: upload upload-naive
 # Telemetry gives the arm to a client that sends "arm" (D-080).
 arm-telemetry-check: upload
 	python3 scripts/arm-telemetry-check.py
+
+# Replay of two real B29 runs in Rerun (B31). rerun-sdk is pinned in
+# scripts/replay-requirements.txt and lives in a venv under build/
+# (Python >= 3.11; nothing is installed globally). Wheels already fetched
+# into build/replay/wheels are used without the network.
+# D-095: playback 0.02, set in the blueprint stored in the file.
+REPLAY_PY ?= /opt/homebrew/bin/python3.13
+REPLAY_VENV := build/replay/venv
+REPLAY_RRD := build/replay/b29.rrd
+REPLAY_WHEELS := $(if $(wildcard build/replay/wheels/*.whl),--no-index --find-links build/replay/wheels)
+
+$(REPLAY_VENV)/bin/rerun: scripts/replay-requirements.txt
+	mkdir -p build/replay
+	test -x $(REPLAY_VENV)/bin/python || $(REPLAY_PY) -m venv $(REPLAY_VENV)
+	$(REPLAY_VENV)/bin/python -m pip install --disable-pip-version-check \
+		$(REPLAY_WHEELS) -r scripts/replay-requirements.txt
+	touch $@
+
+replay-venv: $(REPLAY_VENV)/bin/rerun
+
+build/replay/arm-replay-pose: scripts/arm-replay-pose.c src/common/arm_model.c src/common/arm_model.h
+	mkdir -p build/replay
+	cc -std=c11 -Wall -Wextra -Werror -I src/common -o $@ \
+		scripts/arm-replay-pose.c src/common/arm_model.c -lm
+
+# Writes build/replay/b29.rrd from replay/b29/; fails if the model and a
+# journal differ by more than 0.01 mm in any frame.
+replay-rrd: $(REPLAY_VENV)/bin/rerun build/replay/arm-replay-pose
+	$(REPLAY_VENV)/bin/python scripts/replay_rrd.py --runs replay/b29 \
+		--pose build/replay/arm-replay-pose --out $(REPLAY_RRD)
+
+# Opens a Rerun window (127.0.0.1 only) with the replay and its blueprint,
+# paused at -100 ms; Space plays the loop at 0.02.
+replay-view: replay-rrd
+	$(REPLAY_VENV)/bin/python scripts/replay_view.py --rrd $(REPLAY_RRD)
