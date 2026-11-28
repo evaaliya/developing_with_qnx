@@ -36,27 +36,6 @@ if [ "${1:-}" = naive ]; then
     exit 0
 fi
 
-# The "QNX tools" network (D-098): its own programs in src/qnx-tools/,
-# sharing with Nerve only wire.h, the arm model and the event plan.
-# launch links libham from the HAM package installed in the SDP (F-037).
-if [ "${1:-}" = qnx-tools ]; then
-    mkdir -p build/qnx-tools
-    QT=("${CFLAGS[@]}" -I src/qnx-tools)
-    QT_CORE=(src/qnx-tools/qt_core.c src/common/signal_msg.c)
-    ntoaarch64-gcc "${QT[@]}" -o build/qnx-tools/source \
-        src/qnx-tools/qt_source.c "${QT_CORE[@]}" src/common/source_ctl.c \
-        src/common/arm_model.c src/common/arm_plan.c -lm
-    ntoaarch64-gcc "${QT[@]}" -o build/qnx-tools/relay \
-        src/qnx-tools/qt_relay.c "${QT_CORE[@]}"
-    ntoaarch64-gcc "${QT[@]}" -o build/qnx-tools/sink \
-        src/qnx-tools/qt_sink.c "${QT_CORE[@]}" src/common/node_store.c \
-        src/common/arm_model.c src/common/arm_drive.c src/common/arm_plan.c -lm
-    ntoaarch64-gcc "${QT[@]}" -I "$QNX_TARGET/usr/include" \
-        -o build/qnx-tools/launch src/qnx-tools/qt_launch.c \
-        -L "$QNX_TARGET/aarch64le/usr/lib" -lham
-    exit 0
-fi
-
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/sink "${SINK_SRC[@]}"
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/source "${SOURCE_SRC[@]}"
 ntoaarch64-gcc "${CFLAGS[@]}" -o build/relay "${RELAY_SRC[@]}"
